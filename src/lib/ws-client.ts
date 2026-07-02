@@ -118,6 +118,9 @@ export type GameMessageType =
   | 'room:join'
   | 'room:join_result'
   | 'room:leave'
+  | 'room:dissolve'
+  | 'room:transfer_host'
+  | 'room:update_settings'
   | 'room:state'
   | 'room:player_update'
   | 'room:player_list'
@@ -148,6 +151,7 @@ export interface RoomState {
   maxPlayers: number;
   hostId: string;
   gameMode?: 'simple' | 'professional';
+  allowMidGameJoin?: boolean;
 }
 
 export interface RoomPlayerInfo {

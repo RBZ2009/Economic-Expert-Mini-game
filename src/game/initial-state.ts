@@ -127,10 +127,16 @@ export function createInitialPlayer(
   if (profession === 'worker') {
     player.workerAbilities = {
       skill: 30,
-      wageLevel: ECONOMY_BALANCE.worker.baseWage,
+      wageLevel: Math.round(ECONOMY_BALANCE.worker.baseWage * 0.32),
       trainingSessions: 0,
       unemployedRounds: 0,
       negotiationPower: 20,
+      currentJobId: 'npc_service_hourly',
+      paymentType: 'hourly',
+      educationLevel: 0,
+      experience: 0,
+      employerId: 'npc_service',
+      jobTitle: '小时工服务员',
     };
   }
 

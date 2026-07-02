@@ -23,6 +23,7 @@ export interface StoredGameRoom {
   maxPlayers: number;
   hostId: string;
   gameMode?: GameMode;
+  allowMidGameJoin?: boolean;
   gameState?: GameState;
   createdAt: number;
   updatedAt: number;
@@ -58,6 +59,7 @@ function toStoredRoom(room: GameRoom): StoredGameRoom {
     maxPlayers: room.maxPlayers,
     hostId: room.hostId,
     gameMode: room.gameMode,
+    allowMidGameJoin: room.allowMidGameJoin,
     gameState: room.gameState,
     createdAt: room.createdAt,
     updatedAt: room.updatedAt,

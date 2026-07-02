@@ -49,6 +49,9 @@ interface RoomContextType {
   createRoom: (playerName: string, maxPlayers?: number, gameMode?: GameMode) => void;
   joinRoom: (roomId: string, playerName: string) => void;
   leaveRoom: () => void;
+  dissolveRoom: () => void;
+  transferHost: (targetPlayerId: string) => void;
+  updateRoomSettings: (settings: { allowMidGameJoin?: boolean }) => void;
   setProfession: (profession: PlayerProfession) => void;
   setReady: (ready: boolean) => void;
   startGame: () => void;
@@ -88,7 +91,8 @@ function processMessage(
     showRoundEndEvent: (event: RoundEndEvent) => void;
     setError: (error: string | null) => void;
   },
-  currentRoom: RoomState | null
+  currentRoom: RoomState | null,
+  currentGameState: GameState | null
 ): void {
   const { type, payload } = msg;
 
@@ -137,6 +141,24 @@ function processMessage(
       break;
     }
 
+    case 'room:dissolved': {
+      setters.setRoom(null);
+      setters.setPlayerId(null);
+      setters.setPlayers([]);
+      setters.setGameState(null);
+      setters.setCurrentPlayerId(null);
+      break;
+    }
+
+    case 'room:state': {
+      const data = payload as { room?: RoomState };
+      if (data.room) {
+        setters.setRoom(data.room);
+        setters.setPlayers(data.room.players);
+      }
+      break;
+    }
+
     case 'room:player_list':
     case 'room:player_update': {
       const data = payload as { players?: RoomPlayerInfo[]; playerId?: string; isConnected?: boolean };
@@ -160,7 +182,8 @@ function processMessage(
     case 'game:state': {
       const data = payload as { gameState: GameState; currentPlayerId?: string };
       setters.setGameState(data.gameState);
-      if (data.gameState.currentNews) {
+      const isEnteringNewGameRound = !currentGameState || currentGameState.currentRound !== data.gameState.currentRound;
+      if (data.gameState.currentNews && isEnteringNewGameRound) {
         setters.showRoundEndEvent({
           event: data.gameState.currentNews,
           completedRound: Math.max(0, data.gameState.currentRound - 1),
@@ -366,7 +389,7 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
           setCurrentPlayerId,
           showRoundEndEvent: showRoundEndEventOnce,
           setError,
-        }, currentRoomRef.current);
+        }, currentRoomRef.current, currentGameStateRef.current);
       },
     });
 
@@ -408,6 +431,26 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
   const leaveRoom = useCallback(() => {
     sendMessage({ type: 'room:leave', payload: {} });
   }, [sendMessage]);
+
+  const dissolveRoom = useCallback(() => {
+    sendMessage({ type: 'room:dissolve', payload: {} });
+  }, [sendMessage]);
+
+  const transferHost = useCallback((targetPlayerId: string) => {
+    if (!room || !playerId) return;
+    sendMessage({
+      type: 'room:transfer_host',
+      payload: { roomId: room.id, playerId, targetPlayerId },
+    });
+  }, [room, playerId, sendMessage]);
+
+  const updateRoomSettings = useCallback((settings: { allowMidGameJoin?: boolean }) => {
+    if (!room || !playerId) return;
+    sendMessage({
+      type: 'room:update_settings',
+      payload: { roomId: room.id, playerId, ...settings },
+    });
+  }, [room, playerId, sendMessage]);
 
   // 设置职业
   const setProfession = useCallback((profession: PlayerProfession) => {
@@ -465,6 +508,9 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
     createRoom,
     joinRoom,
     leaveRoom,
+    dissolveRoom,
+    transferHost,
+    updateRoomSettings,
     setProfession,
     setReady,
     startGame,

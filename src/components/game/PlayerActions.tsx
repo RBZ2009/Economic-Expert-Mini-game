@@ -9,6 +9,7 @@ import { Progress } from '@/components/ui/progress';
 import { GoodType, PROFESSION_CONFIGS, INVESTMENT_CONFIGS, MACHINE_CONFIGS, HousingTier, HOUSING_CONFIGS, InvestmentType, POLICY_CONFIGS, PolicyType, formatCurrency, formatPercent, formatNumber, CYCLE_NAMES, CYCLE_MULTIPLIERS, PRODUCTION_CONFIGS, ECONOMY_BALANCE, ProductionGoodType } from '@/types/game';
 import { estimateProductSales, getProductInventory, productionGoodTypes } from './company-helpers';
 import { ActionSection, ActionWorkspace, MetricStrip, StatusBadge, type ActionAdapter } from './workbench';
+import { getJobOffers, getWorkerCurrentJob, getWorkerEducationLevel, getWorkerExperience, isQualifiedForJob } from '@/game/jobs';
 
 // ==================== 商品效果说明表 ====================
 const GOOD_EFFECTS_DISPLAY: Record<GoodType, {
@@ -425,17 +426,25 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
 
   const profession = PROFESSION_CONFIGS[currentPlayer.profession];
   const workerAbility = currentPlayer.workerAbilities;
-  const baseIncome = workerAbility?.wageLevel ?? profession.baseIncome;
+  const currentJob = currentPlayer.profession === 'worker' ? getWorkerCurrentJob(currentPlayer, state.players) : null;
+  const jobOffers = currentPlayer.profession === 'worker'
+    ? getJobOffers(state.players, currentPlayer, state.market.employmentRate)
+    : [];
+  const baseIncome = currentJob?.wage ?? workerAbility?.wageLevel ?? profession.baseIncome;
   const afterTax = baseIncome * (1 - state.market.globalTaxRate);
   const isUnemployed = (workerAbility?.unemployedRounds ?? 0) > 0;
+  const isMonthlyJob = currentJob?.paymentType === 'monthly';
+  const workLimit = currentJob?.paymentType === 'hourly' ? currentJob.maxWorkPerRound : profession.maxWorkPerRound;
+  const workRemaining = Math.max(0, workLimit - currentPlayer.workState.workCount);
+  const canManualWork = canWork && !isMonthlyJob && workRemaining > 0;
 
   const penalty = currentPlayer.workState.workCount > 0 ? 
-    (1 - currentPlayer.workState.workCount * 0.2).toFixed(1)
+    (1 - currentPlayer.workState.workCount * 0.12).toFixed(1)
     : '1.0';
 
   return (
-    <div className="p-3 border rounded-lg bg-gradient-to-r from-blue-50 to-blue-100 dark:from-blue-950/30 dark:to-blue-900/30">
-      <div className="flex items-center justify-between">
+    <div className="p-3 border rounded-lg bg-background">
+      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <h4 className="font-medium flex items-center gap-2">
             <span className="text-2xl">{profession.icon}</span>
@@ -443,28 +452,32 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
             {fatigueWarning && <Badge variant="destructive" className="text-xs">⚠️ 疲劳</Badge>}
           </h4>
           <div className="text-sm text-muted-foreground mt-1">
-            <p>基础收入: ¥{formatCurrency(baseIncome)}</p>
-            <p>税后收入: ¥{formatCurrency(afterTax)} (税率: {formatPercent(state.market.globalTaxRate, 0)}%)</p>
+            {currentJob && <p>当前岗位: {currentJob.title} / {currentJob.paymentType === 'monthly' ? '月薪' : '时薪'} ¥{formatCurrency(baseIncome)}</p>}
+            <p>预计税后: ¥{formatCurrency(afterTax)} (税率: {formatPercent(state.market.globalTaxRate, 0)}%)</p>
+            {isMonthlyJob && <p className="text-emerald-600">月薪岗位每轮自动发薪，普通工作不会重复结算；可以选择加班。</p>}
             <p className="text-orange-500">效率: {penalty}x (过度工作会降低效率)</p>
+            {workerAbility && (
+              <p>技能 {workerAbility.skill} / 学历 {getWorkerEducationLevel(currentPlayer)} / 经验 {getWorkerExperience(currentPlayer)} / 剩余工作 {workRemaining}</p>
+            )}
             {isUnemployed && <p className="text-red-500">当前失业，剩余 {workerAbility?.unemployedRounds} 个月，可尝试副业或等待再就业</p>}
           </div>
         </div>
-        <div className="flex flex-col gap-2">
+        <div className="flex min-w-48 flex-col gap-2">
           <Button 
             onClick={() => dispatch({ type: 'WORK', payload: { playerId: currentPlayer.id } })}
-            disabled={!canWork}
+            disabled={!canManualWork}
             variant="default"
           >
-            工作
+            {isMonthlyJob ? '月薪自动发放' : `工作 (${workRemaining} 次可用)`}
           </Button>
           <div className="grid grid-cols-2 gap-2">
             <Button
               size="sm"
               variant="outline"
-              disabled={currentPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
-              onClick={() => dispatch({ type: 'SWITCH_JOB', payload: { playerId: currentPlayer.id } })}
+              disabled={!isMonthlyJob}
+              onClick={() => dispatch({ type: 'OVERTIME_WORK', payload: { playerId: currentPlayer.id } })}
             >
-              跳槽
+              加班
             </Button>
             <Button
               size="sm"
@@ -476,6 +489,47 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
           </div>
         </div>
       </div>
+      {currentPlayer.profession === 'worker' && (
+        <div className="mt-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h5 className="text-sm font-medium">跳槽机会</h5>
+            <span className="text-xs text-muted-foreground">申请成本 ¥{formatCurrency(ECONOMY_BALANCE.worker.jobSwitchCost)}</span>
+          </div>
+          <div className="grid gap-2 xl:grid-cols-2">
+            {jobOffers.map(offer => {
+              const qualified = isQualifiedForJob(currentPlayer, offer);
+              const isCurrent = offer.id === workerAbility?.currentJobId;
+              return (
+                <div key={offer.id} className="rounded-md border p-2 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-medium">{offer.title}</div>
+                      <div className="text-muted-foreground">{offer.employerName}</div>
+                    </div>
+                    <Badge variant={qualified ? 'default' : 'secondary'}>{qualified ? '符合' : '未达标'}</Badge>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
+                    <span>{offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥{formatCurrency(offer.wage)}</span>
+                    <span>次数 {offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound}/轮` : '自动发薪'}</span>
+                    <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
+                    <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
+                  </div>
+                  <p className="mt-1 text-muted-foreground">{offer.description}</p>
+                  <Button
+                    size="sm"
+                    variant={isCurrent ? 'secondary' : 'outline'}
+                    className="mt-2 w-full"
+                    disabled={isCurrent || !qualified || currentPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
+                    onClick={() => dispatch({ type: 'SWITCH_JOB', payload: { playerId: currentPlayer.id, jobId: offer.id } })}
+                  >
+                    {isCurrent ? '当前岗位' : qualified ? '申请岗位' : '门槛不足'}
+                  </Button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { RoomOptionsMenu } from '@/components/room/RoomOptionsMenu';
 
 const ALL_PROFESSIONS: PlayerProfession[] = ['worker', 'entrepreneur', 'investor', 'government'];
 
@@ -18,7 +19,6 @@ export function LobbyPage() {
     setProfession, 
     setReady, 
     startGame, 
-    leaveRoom,
     error,
     clearError,
   } = useRoom();
@@ -62,6 +62,7 @@ export function LobbyPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-primary/5 to-background p-4 md:p-8">
+      <RoomOptionsMenu />
       <div className="max-w-2xl mx-auto space-y-6">
         {/* 房间信息 */}
         <Card className="border-2 border-primary/30">
@@ -262,13 +263,9 @@ export function LobbyPage() {
                 </Button>
               )}
 
-              {/* 离开房间 */}
-              <Button
-                variant="outline"
-                onClick={leaveRoom}
-              >
-                离开房间
-              </Button>
+              <p className="text-center text-xs text-muted-foreground">
+                房间管理、退出、转让房主等操作在左上角菜单中。
+              </p>
             </div>
 
             {/* 提示 */}

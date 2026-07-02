@@ -5,7 +5,7 @@ export type MultiplayerGameAction =
   | { type: 'OVERTIME_WORK'; payload: Record<string, never> }
   | { type: 'WORKER_TRAINING'; payload: { cost: number } }
   | { type: 'NEGOTIATE_WAGE'; payload: Record<string, never> }
-  | { type: 'SWITCH_JOB'; payload: Record<string, never> }
+  | { type: 'SWITCH_JOB'; payload: { jobId: string } }
   | { type: 'SIDE_JOB'; payload: Record<string, never> }
   | { type: 'BUY_GOOD'; payload: { goodType: GoodType; quantity: number } }
   | { type: 'SELL_GOOD'; payload: { goodType: GoodType; quantity: number } }
@@ -96,13 +96,18 @@ export function validateGameAction(raw: unknown): ValidationResult<MultiplayerGa
     case 'WORK':
     case 'OVERTIME_WORK':
     case 'NEGOTIATE_WAGE':
-    case 'SWITCH_JOB':
     case 'SIDE_JOB':
     case 'SELL_HOUSE':
     case 'CANCEL_RENT':
     case 'UPGRADE_MACHINE':
     case 'END_TURN':
       return { success: true, value: emptyPayload(raw.type) };
+
+    case 'SWITCH_JOB':
+      if (typeof payload.jobId !== 'string' || payload.jobId.length === 0 || payload.jobId.length > 80) {
+        return { success: false, error: '岗位编号无效' };
+      }
+      return { success: true, value: { type: raw.type, payload: { jobId: payload.jobId } } };
 
     case 'BUY_GOOD':
     case 'SELL_GOOD': {

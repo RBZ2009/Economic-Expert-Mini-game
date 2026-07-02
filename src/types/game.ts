@@ -491,6 +491,7 @@ export interface WorkState {
   fatigueLevel: number;   // 疲劳度 0-100
   lastWorkTime?: number;
   overtimeCount?: number;
+  monthlySalaryPaidRound?: number;
 }
 
 // ------------------- 职业配置 -------------------
@@ -805,6 +806,10 @@ export interface Player {
     lastNegotiationRound?: number;
     employerId?: string;
     jobTitle?: string;
+    currentJobId?: string;
+    paymentType?: 'monthly' | 'hourly';
+    educationLevel?: number;
+    experience?: number;
   };
   
   company?: Company;

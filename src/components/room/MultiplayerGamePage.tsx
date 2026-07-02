@@ -27,6 +27,7 @@ import {
   ECONOMY_BALANCE,
 } from '@/types/game';
 import { estimateProductSales, getProductInventory, productionGoodTypes } from '@/components/game/company-helpers';
+import { getJobOffers, getWorkerCurrentJob, getWorkerEducationLevel, getWorkerExperience, isQualifiedForJob } from '@/game/jobs';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -34,6 +35,7 @@ import { Progress } from '@/components/ui/progress';
 import { Input } from '@/components/ui/input';
 import { AlertDialog, AlertDialogAction, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { ActionSection, ActionWorkspace, GameWorkbench, MetricStrip, StatusBadge, type ActionAdapter } from '@/components/game/workbench';
+import { RoomOptionsMenu } from '@/components/room/RoomOptionsMenu';
 
 type SendGameAction = (action: { type: string; payload: Record<string, unknown> }) => void;
 
@@ -125,6 +127,7 @@ export function MultiplayerGamePage() {
 
   return (
     <>
+      <RoomOptionsMenu />
       {/* 错误提示 */}
       {error && (
         <div className="fixed top-4 right-4 z-50 bg-red-500 text-white px-4 py-2 rounded-lg shadow-lg flex items-center gap-2">
@@ -489,7 +492,7 @@ function FullActionPanel({ adapter }: { adapter: ActionAdapter }) {
             { label: '疲劳', value: `${myPlayer.workState.fatigueLevel}/100`, tone: myPlayer.workState.fatigueLevel > 50 ? 'warn' : 'default' },
           ]}
         />
-        <WorkActionPanel myPlayer={myPlayer} sendAction={sendAction} />
+        <WorkActionPanel myPlayer={myPlayer} gameState={gameState} sendAction={sendAction} />
         <HealthPanel myPlayer={myPlayer} sendAction={sendAction} gameState={gameState} />
         <HousingPanel myPlayer={myPlayer} sendAction={sendAction} />
       </ActionSection>
@@ -531,13 +534,19 @@ function FullActionPanel({ adapter }: { adapter: ActionAdapter }) {
 }
 
 // ==================== 工作面板 ====================
-function WorkActionPanel({ myPlayer, sendAction }: { myPlayer: Player; sendAction: SendGameAction }) {
+function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player; gameState: GameState; sendAction: SendGameAction }) {
   const profession = PROFESSION_CONFIGS[myPlayer.profession] as ProfessionConfig;
-  const workRemaining = profession.maxWorkPerRound - myPlayer.workState.workCount;
   const workerAbilities = myPlayer.workerAbilities;
   const isUnemployed = (workerAbilities?.unemployedRounds ?? 0) > 0;
-  const canWork = workRemaining > 0 && !isUnemployed;
-  const wageLevel = workerAbilities?.wageLevel ?? profession.baseIncome;
+  const currentJob = myPlayer.profession === 'worker' ? getWorkerCurrentJob(myPlayer, gameState.players) : null;
+  const jobOffers = myPlayer.profession === 'worker'
+    ? getJobOffers(gameState.players, myPlayer, gameState.market.employmentRate)
+    : [];
+  const workLimit = currentJob?.paymentType === 'hourly' ? currentJob.maxWorkPerRound : profession.maxWorkPerRound;
+  const workRemaining = Math.max(0, workLimit - myPlayer.workState.workCount);
+  const isMonthlyJob = currentJob?.paymentType === 'monthly';
+  const canWork = workRemaining > 0 && !isUnemployed && !isMonthlyJob;
+  const wageLevel = currentJob?.wage ?? workerAbilities?.wageLevel ?? profession.baseIncome;
 
   if (myPlayer.profession === 'worker') {
     return (
@@ -550,17 +559,24 @@ function WorkActionPanel({ myPlayer, sendAction }: { myPlayer: Player; sendActio
               <div className="text-muted-foreground">技能</div>
             </div>
             <div className="bg-muted/50 rounded p-2 text-center">
-              <div className="font-bold">¥{formatCurrency(workerAbilities.wageLevel)}</div>
-              <div className="text-muted-foreground">月薪</div>
+              <div className="font-bold">¥{formatCurrency(wageLevel)}</div>
+              <div className="text-muted-foreground">{isMonthlyJob ? '月薪' : '时薪'}</div>
             </div>
             <div className="bg-muted/50 rounded p-2 text-center">
-              <div className="font-bold">{workerAbilities.negotiationPower}</div>
-              <div className="text-muted-foreground">谈判</div>
+              <div className="font-bold">{getWorkerEducationLevel(myPlayer)} / {getWorkerExperience(myPlayer)}</div>
+              <div className="text-muted-foreground">学历/经验</div>
             </div>
           </div>
         )}
+        {currentJob && (
+          <div className="mb-3 rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+            <div className="font-medium text-foreground">{currentJob.title} · {currentJob.employerName}</div>
+            <div>{currentJob.paymentType === 'monthly' ? '每轮自动发薪，不能重复普通工作。' : `按工时结算，每轮最多 ${currentJob.maxWorkPerRound} 次。`}</div>
+            <div>消耗：健康 -{currentJob.healthCost} / 幸福 -{currentJob.happinessCost} / 疲劳 +{currentJob.fatigueCost}</div>
+          </div>
+        )}
         <div className="flex items-center justify-between mb-2">
-          <span className="text-sm">剩余工作次数: {workRemaining}/{profession.maxWorkPerRound}</span>
+          <span className="text-sm">剩余工作次数: {workRemaining}/{workLimit}</span>
           {myPlayer.workState.fatigueLevel > 50 && (
             <Badge variant="destructive" className="text-xs">疲劳警告</Badge>
           )}
@@ -579,7 +595,7 @@ function WorkActionPanel({ myPlayer, sendAction }: { myPlayer: Player; sendActio
           disabled={!canWork}
           onClick={() => sendAction({ type: 'WORK', payload: { playerId: myPlayer.id } })}
         >
-          {isUnemployed ? '失业中，不能正式工作' : canWork ? `工作 (约 ¥${formatCurrency(wageLevel)})` : '本轮工作次数已用完'}
+          {isUnemployed ? '失业中，不能正式工作' : isMonthlyJob ? '月薪自动发放' : canWork ? `工作 (约 ¥${formatCurrency(wageLevel)})` : '本轮工作次数已用完'}
         </Button>
         <div className="grid grid-cols-3 gap-2 mt-2">
           <Button
@@ -600,20 +616,13 @@ function WorkActionPanel({ myPlayer, sendAction }: { myPlayer: Player; sendActio
           <Button
             size="sm"
             variant="outline"
+            disabled={!isMonthlyJob}
             onClick={() => sendAction({ type: 'OVERTIME_WORK', payload: { playerId: myPlayer.id } })}
           >
             加班
           </Button>
         </div>
-        <div className="grid grid-cols-2 gap-2 mt-2">
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={myPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
-            onClick={() => sendAction({ type: 'SWITCH_JOB', payload: { playerId: myPlayer.id } })}
-          >
-            跳槽
-          </Button>
+        <div className="grid grid-cols-1 gap-2 mt-2">
           <Button
             size="sm"
             variant="outline"
@@ -621,6 +630,43 @@ function WorkActionPanel({ myPlayer, sendAction }: { myPlayer: Player; sendActio
           >
             副业
           </Button>
+        </div>
+        <div className="mt-4 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <h5 className="text-sm font-medium">跳槽机会</h5>
+            <span className="text-xs text-muted-foreground">申请成本 ¥{formatCurrency(ECONOMY_BALANCE.worker.jobSwitchCost)}</span>
+          </div>
+          {jobOffers.map(offer => {
+            const qualified = isQualifiedForJob(myPlayer, offer);
+            const isCurrent = offer.id === workerAbilities?.currentJobId;
+            return (
+              <div key={offer.id} className="rounded-md border p-2 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="font-medium">{offer.title}</div>
+                    <div className="text-muted-foreground">{offer.employerName}</div>
+                  </div>
+                  <Badge variant={qualified ? 'default' : 'secondary'}>{qualified ? '符合' : '未达标'}</Badge>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
+                  <span>{offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥{formatCurrency(offer.wage)}</span>
+                  <span>{offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound} 次/轮` : '自动发薪'}</span>
+                  <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
+                  <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
+                </div>
+                <p className="mt-1 text-muted-foreground">{offer.description}</p>
+                <Button
+                  size="sm"
+                  variant={isCurrent ? 'secondary' : 'outline'}
+                  className="mt-2 w-full"
+                  disabled={isCurrent || !qualified || myPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
+                  onClick={() => sendAction({ type: 'SWITCH_JOB', payload: { playerId: myPlayer.id, jobId: offer.id } })}
+                >
+                  {isCurrent ? '当前岗位' : qualified ? '申请岗位' : '门槛不足'}
+                </Button>
+              </div>
+            );
+          })}
         </div>
       </div>
     );

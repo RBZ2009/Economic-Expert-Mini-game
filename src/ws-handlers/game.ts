@@ -6,8 +6,9 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { roomManager, GameRoom } from '@/lib/room-manager';
 import { validateGameAction, validatePlayerProfession } from '@/game/actions';
 import { applyMultiplayerGameAction, MultiplayerActionHandlers } from '@/game/engine';
-import { createInitialGameState } from '@/game/initial-state';
+import { createInitialGameState, createInitialPlayer } from '@/game/initial-state';
 import { applyNewsEvent, pickNewsEvent } from '@/game/news';
+import { getJobOffers, getWorkerCurrentJob, isQualifiedForJob } from '@/game/jobs';
 import {
   GameState,
   Player,
@@ -42,34 +43,6 @@ const generateBatchId = () => 'batch_' + Math.random().toString(36).substring(2,
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
-}
-
-function getBestJobOffer(players: Player[], worker: Player, marketEmploymentRate: number) {
-  const ability = worker.workerAbilities;
-  const skill = ability?.skill ?? 30;
-  const entrepreneurOffers = players
-    .filter(player => player.profession === 'entrepreneur' && player.company)
-    .map(player => {
-      const company = player.company!;
-      const requiredSkill = Math.max(20, Math.min(85, 20 + company.productQuality * 0.45 + company.machines * 3));
-      const wage = Math.round((company.productionCost || ECONOMY_BALANCE.company.wagePerEmployee) * (1 + Math.min(0.4, company.reputation / 250)));
-      return {
-        employerId: player.id,
-        employerName: company.name,
-        title: `${company.name} 生产岗位`,
-        requiredSkill,
-        wage,
-      };
-    });
-  const npcOffers = [
-    { employerId: 'npc_basic', employerName: 'NPC基础企业', title: '基础服务岗位', requiredSkill: 20, wage: Math.round(ECONOMY_BALANCE.worker.baseWage * 0.9) },
-    { employerId: 'npc_factory', employerName: 'NPC制造企业', title: '制造业岗位', requiredSkill: 45, wage: Math.round(ECONOMY_BALANCE.worker.baseWage * 1.08) },
-    { employerId: 'npc_tech', employerName: 'NPC成长企业', title: '技能型岗位', requiredSkill: 70, wage: Math.round(ECONOMY_BALANCE.worker.baseWage * 1.3) },
-  ];
-  const offers = [...entrepreneurOffers, ...npcOffers].sort((a, b) => b.wage - a.wage);
-  return offers.find(offer => skill >= offer.requiredSkill)
-    ?? offers.find(offer => skill + marketEmploymentRate * 0.2 >= offer.requiredSkill)
-    ?? npcOffers[0];
 }
 
 function applyPendingPoliciesForRound(gameState: GameState, market: GameState['market'], round: number): { market: GameState['market']; appliedNews: RandomEvent | null; remainingPolicies: GameState['pendingPolicies'] } {
@@ -552,6 +525,8 @@ function toPublicRoom(room: GameRoom) {
     })),
     maxPlayers: room.maxPlayers,
     hostId: room.hostId,
+    gameMode: room.gameMode,
+    allowMidGameJoin: room.allowMidGameJoin,
   };
 }
 
@@ -599,17 +574,30 @@ function handleWork(room: GameRoom, playerId: string): { success: boolean; error
   if (blockReason) return { success: false, error: blockReason };
 
   const professionConfig = PROFESSION_CONFIGS[player.profession];
-  
-  if (player.workState.workCount >= professionConfig.maxWorkPerRound) {
-    return { success: false, error: '本轮工作次数已用完' };
-  }
 
-  const fatiguePenalty = player.workState.workCount > 0 ? player.workState.workCount * 0.2 : 0;
-  const skillBonus = player.workerAbilities ? player.workerAbilities.skill * 0.01 : 0;
-  const workerWage = player.workerAbilities?.wageLevel ?? room.gameState.market.laborMarket?.baseWage ?? ECONOMY_BALANCE.worker.baseWage;
-  let income = (player.profession === 'worker' ? workerWage : professionConfig.baseIncome) * (1 - fatiguePenalty) * (1 + skillBonus);
+  const currentJob = player.profession === 'worker'
+    ? getWorkerCurrentJob(player, room.gameState.players)
+    : null;
+  if (player.profession === 'worker' && currentJob?.paymentType === 'monthly') {
+    return { success: false, error: '月薪岗位每轮自动发薪，不能重复手动工作，可选择加班' };
+  }
+  const maxWorkPerRound = currentJob?.paymentType === 'hourly' ? currentJob.maxWorkPerRound : professionConfig.maxWorkPerRound;
+  if (player.workState.workCount >= maxWorkPerRound) return { success: false, error: '本轮工作次数已用完' };
+
+  const fatiguePenalty = player.workState.workCount > 0 ? player.workState.workCount * 0.12 : 0;
+  const skillBonus = player.workerAbilities ? player.workerAbilities.skill * 0.004 : 0;
+  let income = player.profession === 'worker' && currentJob
+    ? currentJob.wage * (1 - fatiguePenalty) * (1 + skillBonus)
+    : professionConfig.baseIncome * (1 - fatiguePenalty) * (1 + skillBonus);
   let healthCost = 5;
+  let happinessDelta = 2 - player.workState.workCount;
   let fatigueIncrease = 20;
+
+  if (player.profession === 'worker' && currentJob) {
+    healthCost = currentJob.healthCost;
+    happinessDelta = -currentJob.happinessCost;
+    fatigueIncrease = currentJob.fatigueCost;
+  }
 
   if (player.profession === 'entrepreneur') {
     income = player.company?.profit || 0;
@@ -630,11 +618,16 @@ function handleWork(room: GameRoom, playerId: string): { success: boolean; error
 
   room.gameState.players = room.gameState.players.map(p => {
     if (p.id !== playerId) return p;
+    const ability = p.workerAbilities;
     return {
       ...p,
       cash: p.cash + afterTax,
       health: Math.max(0, p.health - healthCost),
-      happiness: Math.min(100, p.happiness + 2 - p.workState.workCount),
+      happiness: clamp(p.happiness + happinessDelta, 0, 100),
+      workerAbilities: ability ? {
+        ...ability,
+        experience: (ability.experience ?? 0) + (p.profession === 'worker' ? 1 : 0),
+      } : ability,
       workState: {
         workCount: p.workState.workCount + 1,
         fatigueLevel: Math.min(100, p.workState.fatigueLevel + fatigueIncrease),
@@ -658,18 +651,27 @@ function handleOvertimeWork(room: GameRoom, playerId: string): { success: boolea
   const blockReason = isPlayerActionBlocked(room, playerId);
   if (blockReason) return { success: false, error: blockReason };
 
-  const wage = player.workerAbilities?.wageLevel ?? ECONOMY_BALANCE.worker.baseWage;
+  const currentJob = getWorkerCurrentJob(player, room.gameState.players);
+  if (!currentJob.overtimeAllowed || currentJob.paymentType !== 'monthly') {
+    return { success: false, error: '当前岗位不支持加班' };
+  }
+  const wage = player.workerAbilities?.wageLevel ?? currentJob.wage;
   const income = wage * ECONOMY_BALANCE.worker.overtimeMultiplier;
   const taxPaid = income * room.gameState.market.globalTaxRate;
   addTaxRevenue(room.gameState, taxPaid);
 
   room.gameState.players = room.gameState.players.map(p => {
     if (p.id !== playerId) return p;
+    const ability = p.workerAbilities;
     return {
       ...p,
       cash: p.cash + income - taxPaid,
-      health: Math.max(0, p.health - 12),
-      happiness: Math.max(0, p.happiness - 4),
+      health: Math.max(0, p.health - currentJob.healthCost - 8),
+      happiness: Math.max(0, p.happiness - currentJob.happinessCost - 3),
+      workerAbilities: ability ? {
+        ...ability,
+        experience: (ability.experience ?? 0) + 1,
+      } : ability,
       workState: {
         ...p.workState,
         workCount: p.workState.workCount + 1,
@@ -709,6 +711,8 @@ function handleWorkerTraining(room: GameRoom, playerId: string, cost: number): {
         skill: Math.min(100, ability.skill + ECONOMY_BALANCE.worker.trainingSkillGain),
         trainingSessions: ability.trainingSessions + 1,
         negotiationPower: Math.min(100, ability.negotiationPower + 6),
+        educationLevel: Math.min(4, (ability.educationLevel ?? 0) + (ability.trainingSessions % 2 === 1 ? 1 : 0)),
+        experience: (ability.experience ?? 0) + 1,
       },
     };
   });
@@ -767,7 +771,7 @@ function handleNegotiateWage(room: GameRoom, playerId: string): { success: boole
   return { success: true };
 }
 
-function handleSwitchJob(room: GameRoom, playerId: string): { success: boolean; error?: string } {
+function handleSwitchJob(room: GameRoom, playerId: string, jobId: string): { success: boolean; error?: string } {
   if (!room.gameState) return { success: false, error: '游戏未开始' };
   const player = getPlayerFromGame(room.gameState, playerId);
   if (!player) return { success: false, error: '玩家不存在' };
@@ -783,11 +787,9 @@ function handleSwitchJob(room: GameRoom, playerId: string): { success: boolean; 
     unemployedRounds: 0,
     negotiationPower: 20,
   };
-  const offer = getBestJobOffer(room.gameState.players, player, room.gameState.market.employmentRate);
-  const employmentBonus = (room.gameState.market.employmentRate - 60) * 0.006;
-  const skillGap = ability.skill - offer.requiredSkill;
-  const successChance = clamp(0.25 + skillGap * 0.012 + ability.negotiationPower * 0.003 + employmentBonus, 0.08, 0.92);
-  const succeeded = Math.random() < successChance;
+  const offer = getJobOffers(room.gameState.players, player, room.gameState.market.employmentRate).find(item => item.id === jobId);
+  if (!offer) return { success: false, error: '岗位不存在或已失效' };
+  const qualified = isQualifiedForJob(player, offer);
 
   room.gameState.players = room.gameState.players.map(p => {
     if (p.id !== playerId) return p;
@@ -795,14 +797,16 @@ function handleSwitchJob(room: GameRoom, playerId: string): { success: boolean; 
     return {
       ...p,
       cash: p.cash - ECONOMY_BALANCE.worker.jobSwitchCost,
-      happiness: clamp(p.happiness + (succeeded ? 6 : -5), 0, 100),
+      happiness: clamp(p.happiness + (qualified ? 6 : -5), 0, 100),
       workerAbilities: {
         ...current,
-        wageLevel: succeeded ? Math.max(current.wageLevel, offer.wage) : current.wageLevel,
-        unemployedRounds: succeeded ? 0 : Math.max(current.unemployedRounds, 1),
+        wageLevel: qualified ? offer.wage : current.wageLevel,
+        unemployedRounds: qualified ? 0 : Math.max(current.unemployedRounds, 1),
         negotiationPower: Math.min(100, current.negotiationPower + 4),
-        employerId: succeeded ? offer.employerId : current.employerId,
-        jobTitle: succeeded ? offer.title : current.jobTitle,
+        employerId: qualified ? offer.employerId : current.employerId,
+        jobTitle: qualified ? offer.title : current.jobTitle,
+        currentJobId: qualified ? offer.id : current.currentJobId,
+        paymentType: qualified ? offer.paymentType : current.paymentType,
       },
     };
   });
@@ -812,7 +816,7 @@ function handleSwitchJob(room: GameRoom, playerId: string): { success: boolean; 
     round: room.gameState.currentRound,
     timestamp: Date.now(),
     type: 'action',
-    message: succeeded ? `${player.name} 跳槽到 ${offer.employerName}，获得 ${offer.title}，月薪 ¥${offer.wage}` : `${player.name} 未达到 ${offer.title} 门槛，跳槽失败并短暂失业 1 个月`,
+    message: qualified ? `${player.name} 入职 ${offer.employerName}：${offer.title}，${offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥${offer.wage}` : `${player.name} 未达到 ${offer.title} 门槛，跳槽失败并短暂失业 1 个月`,
     playerId,
   });
 
@@ -2089,6 +2093,7 @@ function settleRound(gameState: GameState): GameState {
     let creditScore = player.creditScore ?? 70;
     const workerAbilities = player.workerAbilities ? { ...player.workerAbilities } : undefined;
     const investorAbilities = player.investorAbilities ? { ...player.investorAbilities } : undefined;
+    let monthlyJobFatigueCost = 0;
 
     const investorSkillBonus = investorAbilities ? investorAbilities.investmentSkill / 200 : 0;
     for (const asset of assets) {
@@ -2181,6 +2186,20 @@ function settleRound(gameState: GameState): GameState {
           );
         }
       } else {
+        const currentJob = getWorkerCurrentJob({ ...player, workerAbilities }, gameState.players);
+        if (
+          currentJob.paymentType === 'monthly'
+          && player.workState.monthlySalaryPaidRound !== gameState.currentRound
+        ) {
+          const monthlyIncome = Math.round(currentJob.wage * (1 + player.permanentBonuses.incomeBonus));
+          const salaryTax = Math.max(0, monthlyIncome * market.globalTaxRate);
+          cash += monthlyIncome - salaryTax;
+          taxRevenue += salaryTax;
+          health -= currentJob.healthCost;
+          happiness -= currentJob.happinessCost;
+          monthlyJobFatigueCost = currentJob.fatigueCost;
+          workerAbilities.experience = (workerAbilities.experience ?? 0) + 1;
+        }
         const laborStress = Math.max(0, 75 - market.employmentRate) / 75;
         const unemploymentRisk = ECONOMY_BALANCE.worker.unemploymentBaseRisk + laborStress * ECONOMY_BALANCE.worker.unemploymentLowEmploymentRisk;
         if (Math.random() < unemploymentRisk) {
@@ -2300,7 +2319,14 @@ function settleRound(gameState: GameState): GameState {
       health: Math.max(0, Math.min(100, health)),
       happiness: Math.max(0, Math.min(100, happiness)),
       socialStatus: Math.max(0, socialStatus),
-      workState: { workCount: 0, overtimeCount: 0, fatigueLevel: Math.max(0, player.workState.fatigueLevel - 20) },
+      workState: {
+        workCount: 0,
+        overtimeCount: 0,
+        fatigueLevel: Math.max(0, player.workState.fatigueLevel - 20 + monthlyJobFatigueCost),
+        monthlySalaryPaidRound: player.profession === 'worker' && workerAbilities?.paymentType === 'monthly'
+          ? gameState.currentRound
+          : player.workState.monthlySalaryPaidRound,
+      },
       rentPaid: false,
       hasActedThisRound: false,
       isBankrupt: cash < ECONOMY_BALANCE.company.bankruptcyLimit,
@@ -2501,7 +2527,7 @@ const multiplayerActionHandlers: MultiplayerActionHandlers<GameRoom> = {
   OVERTIME_WORK: (room, playerId) => handleOvertimeWork(room, playerId),
   WORKER_TRAINING: (room, playerId, action) => handleWorkerTraining(room, playerId, action.payload.cost),
   NEGOTIATE_WAGE: (room, playerId) => handleNegotiateWage(room, playerId),
-  SWITCH_JOB: (room, playerId) => handleSwitchJob(room, playerId),
+  SWITCH_JOB: (room, playerId, action) => handleSwitchJob(room, playerId, action.payload.jobId),
   SIDE_JOB: (room, playerId) => handleSideJob(room, playerId),
   BUY_GOOD: (room, playerId, action) => handleBuyGood(room, playerId, action.payload.goodType, action.payload.quantity),
   SELL_GOOD: (room, playerId, action) => handleSellGood(room, playerId, action.payload.goodType, action.payload.quantity),
@@ -2649,6 +2675,17 @@ export function setupGameHandler(wss: WebSocketServer) {
         
         if (result.success && result.room && result.playerId) {
           roomManager.updatePlayerWs(deviceId, ws);
+          const joinedPlayer = result.room.players.find(player => player.id === result.playerId);
+          if (result.room.status === 'playing' && result.room.gameState && joinedPlayer && !result.room.gameState.players.some(player => player.id === result.playerId)) {
+            joinedPlayer.profession = 'worker';
+            joinedPlayer.isReady = true;
+            const gamePlayer = createInitialPlayer(joinedPlayer.id, joinedPlayer.name, joinedPlayer.color, 'worker');
+            result.room.gameState = {
+              ...result.room.gameState,
+              players: [...result.room.gameState.players, gamePlayer],
+            };
+            roomManager.updateGameState(result.room.id, result.room.gameState);
+          }
           
           sendJson(ws, {
             type: 'room:join_result',
@@ -2662,15 +2699,9 @@ export function setupGameHandler(wss: WebSocketServer) {
           // 广播给房间内其他玩家
           const room = roomManager.getRoom(roomId.toUpperCase());
           if (room) {
-            broadcastToRoom(room, {
-              type: 'room:player_list',
-              payload: { players: toPublicRoom(room).players },
-            }, result.playerId);
+            broadcastToRoom(room, { type: 'room:state', payload: { room: toPublicRoom(room) } });
             if (room.gameState) {
-              sendJson(ws, {
-                type: 'game:state',
-                payload: { gameState: room.gameState },
-              });
+              broadcastToRoom(room, { type: 'game:state', payload: { gameState: room.gameState } });
             }
           }
         } else {
@@ -2683,11 +2714,69 @@ export function setupGameHandler(wss: WebSocketServer) {
       }
 
       case 'room:leave': {
+        const beforeRoom = roomManager.getRoomByDevice(deviceId);
         const result = roomManager.leaveRoom(deviceId);
         sendJson(ws, {
           type: 'room:leave_result',
           payload: { success: result.success },
         });
+        if (result.success && result.roomId) {
+          const room = roomManager.getRoom(result.roomId);
+          if (room) {
+            broadcastToRoom(room, { type: 'room:state', payload: { room: toPublicRoom(room) } });
+            if (room.gameState) {
+              broadcastToRoom(room, { type: 'game:state', payload: { gameState: room.gameState } });
+            }
+          }
+        } else if (result.success && beforeRoom) {
+          sendJson(ws, { type: 'room:left', payload: { roomId: beforeRoom.id } });
+        }
+        break;
+      }
+
+      case 'room:dissolve': {
+        const room = roomManager.getRoomByDevice(deviceId);
+        if (!room) {
+          sendJson(ws, { type: 'room:error', payload: { message: '不在房间中' } });
+          return;
+        }
+        const connection = roomManager.getPlayerConnection(deviceId);
+        if (!connection || room.hostId !== connection.playerId) {
+          sendJson(ws, { type: 'room:error', payload: { message: '只有房主可以解散房间' } });
+          return;
+        }
+        broadcastToRoom(room, { type: 'room:dissolved', payload: { roomId: room.id } });
+        roomManager.deleteRoom(room.id);
+        break;
+      }
+
+      case 'room:transfer_host': {
+        const { targetPlayerId } = payload as { targetPlayerId?: unknown };
+        if (typeof targetPlayerId !== 'string') {
+          sendJson(ws, { type: 'room:error', payload: { message: '目标玩家无效' } });
+          return;
+        }
+        const result = roomManager.transferHost(deviceId, targetPlayerId);
+        if (!result.success || !result.room) {
+          sendJson(ws, { type: 'room:error', payload: { message: result.error || '转让房主失败' } });
+          return;
+        }
+        broadcastToRoom(result.room, { type: 'room:state', payload: { room: toPublicRoom(result.room) } });
+        break;
+      }
+
+      case 'room:update_settings': {
+        const { allowMidGameJoin } = payload as { allowMidGameJoin?: unknown };
+        if (allowMidGameJoin !== undefined && typeof allowMidGameJoin !== 'boolean') {
+          sendJson(ws, { type: 'room:error', payload: { message: '房间设置无效' } });
+          return;
+        }
+        const result = roomManager.updateRoomSettings(deviceId, { allowMidGameJoin });
+        if (!result.success || !result.room) {
+          sendJson(ws, { type: 'room:error', payload: { message: result.error || '修改房间设置失败' } });
+          return;
+        }
+        broadcastToRoom(result.room, { type: 'room:state', payload: { room: toPublicRoom(result.room) } });
         break;
       }
 

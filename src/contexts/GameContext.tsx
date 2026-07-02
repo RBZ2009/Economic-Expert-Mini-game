@@ -42,6 +42,7 @@ import {
 } from '@/types/game';
 import { applyNewsEvent, pickNewsEvent } from '@/game/news';
 import { getEndTurnTutorialPrompt } from '@/game/education';
+import { getJobOffers, getWorkerCurrentJob, isQualifiedForJob } from '@/game/jobs';
 
 // ==================== 类型定义 ====================
 
@@ -60,7 +61,7 @@ type GameAction =
   | { type: 'OVERTIME_WORK'; payload: { playerId: string } }
   | { type: 'WORKER_TRAINING'; payload: { playerId: string; cost: number } }
   | { type: 'NEGOTIATE_WAGE'; payload: { playerId: string } }
-  | { type: 'SWITCH_JOB'; payload: { playerId: string } }
+  | { type: 'SWITCH_JOB'; payload: { playerId: string; jobId: string } }
   | { type: 'SIDE_JOB'; payload: { playerId: string } }
   
   // 市场交易
@@ -124,34 +125,6 @@ const generateId = () => Math.random().toString(36).substring(2, 15);
 const generateBatchId = () => 'batch_' + Math.random().toString(36).substring(2, 15);
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
-
-function getBestJobOffer(players: Player[], worker: Player, marketEmploymentRate: number) {
-  const ability = worker.workerAbilities;
-  const skill = ability?.skill ?? 30;
-  const entrepreneurOffers = players
-    .filter(player => player.profession === 'entrepreneur' && player.company)
-    .map(player => {
-      const company = player.company!;
-      const requiredSkill = Math.max(20, Math.min(85, 20 + company.productQuality * 0.45 + company.machines * 3));
-      const wage = Math.round((company.productionCost || ECONOMY_BALANCE.company.wagePerEmployee) * (1 + Math.min(0.4, company.reputation / 250)));
-      return {
-        employerId: player.id,
-        employerName: company.name,
-        title: `${company.name} 生产岗位`,
-        requiredSkill,
-        wage,
-      };
-    });
-  const npcOffers = [
-    { employerId: 'npc_basic', employerName: 'NPC基础企业', title: '基础服务岗位', requiredSkill: 20, wage: Math.round(ECONOMY_BALANCE.worker.baseWage * 0.9) },
-    { employerId: 'npc_factory', employerName: 'NPC制造企业', title: '制造业岗位', requiredSkill: 45, wage: Math.round(ECONOMY_BALANCE.worker.baseWage * 1.08) },
-    { employerId: 'npc_tech', employerName: 'NPC成长企业', title: '技能型岗位', requiredSkill: 70, wage: Math.round(ECONOMY_BALANCE.worker.baseWage * 1.3) },
-  ];
-  const offers = [...entrepreneurOffers, ...npcOffers].sort((a, b) => b.wage - a.wage);
-  return offers.find(offer => skill >= offer.requiredSkill)
-    ?? offers.find(offer => skill + marketEmploymentRate * 0.2 >= offer.requiredSkill)
-    ?? npcOffers[0];
-}
 
 function applyPendingPoliciesForRound(state: GameState, market: Market, round: number): { market: Market; appliedNews: RandomEvent | null; remainingPolicies: GameState['pendingPolicies'] } {
   const duePolicies = state.pendingPolicies.filter(policy => policy.effectiveRound <= round);
@@ -510,10 +483,16 @@ const createInitialPlayer = (
     },
     workerAbilities: profession === 'worker' ? {
       skill: 30,
-      wageLevel: ECONOMY_BALANCE.worker.baseWage,
+      wageLevel: Math.round(ECONOMY_BALANCE.worker.baseWage * 0.32),
       trainingSessions: 0,
       unemployedRounds: 0,
       negotiationPower: 20,
+      currentJobId: 'npc_service_hourly',
+      paymentType: 'hourly',
+      educationLevel: 0,
+      experience: 0,
+      employerId: 'npc_service',
+      jobTitle: '小时工服务员',
     } : undefined,
     policyCooldowns: profession === 'government' ? {
       tax_raise: 0,
@@ -730,23 +709,32 @@ function gameReducer(state: GameState, action: GameAction): GameState {
       if (player.profession === 'worker' && (player.workerAbilities?.unemployedRounds ?? 0) > 0) return state;
 
       const professionConfig = PROFESSION_CONFIGS[player.profession];
-      
-      // 检查工作限制
-      if (player.workState.workCount >= professionConfig.maxWorkPerRound) {
-        return state;
-      }
 
-      // 疲劳惩罚
-      const fatiguePenalty = player.workState.workCount > 0 ? 
-        player.workState.workCount * 0.2 : 0;
-      
-      const skillBonus = player.workerAbilities ? player.workerAbilities.skill * 0.01 : 0;
-      const workerWage = player.workerAbilities?.wageLevel ?? state.market.laborMarket?.baseWage ?? ECONOMY_BALANCE.worker.baseWage;
-      let income = (player.profession === 'worker' ? workerWage : professionConfig.baseIncome) * (1 - fatiguePenalty) * (1 + skillBonus);
+      const currentJob = player.profession === 'worker'
+        ? getWorkerCurrentJob(player, state.players)
+        : null;
+      const maxWorkPerRound = currentJob?.paymentType === 'hourly'
+        ? currentJob.maxWorkPerRound
+        : professionConfig.maxWorkPerRound;
+
+      if (player.profession === 'worker' && currentJob?.paymentType === 'monthly') return state;
+      if (player.workState.workCount >= maxWorkPerRound) return state;
+
+      const fatiguePenalty = player.workState.workCount > 0 ? player.workState.workCount * 0.12 : 0;
+      const skillBonus = player.workerAbilities ? player.workerAbilities.skill * 0.004 : 0;
+      let income = player.profession === 'worker' && currentJob
+        ? currentJob.wage * (1 - fatiguePenalty) * (1 + skillBonus)
+        : professionConfig.baseIncome * (1 - fatiguePenalty) * (1 + skillBonus);
       let healthCost = 5;
+      let happinessDelta = 2 - player.workState.workCount;
       let fatigueIncrease = 20;
 
-      // 特殊职业处理
+      if (player.profession === 'worker' && currentJob) {
+        healthCost = currentJob.healthCost;
+        happinessDelta = -currentJob.happinessCost;
+        fatigueIncrease = currentJob.fatigueCost;
+      }
+
       if (player.profession === 'entrepreneur') {
         income = player.company?.profit || 0;
         healthCost = 3;
@@ -759,7 +747,6 @@ function gameReducer(state: GameState, action: GameAction): GameState {
         fatigueIncrease = 10;
       }
 
-      // 应用永久加成和税率
       income = income * (1 + player.permanentBonuses.incomeBonus);
       const taxPaid = Math.max(0, income * state.market.globalTaxRate);
       const afterTax = income - taxPaid;
@@ -767,14 +754,19 @@ function gameReducer(state: GameState, action: GameAction): GameState {
       const updatedPlayers = creditTaxToGovernment(state.players.map(p => {
         if (p.id !== playerId) return p;
         
-        const extraHealthCost = player.workState.workCount >= professionConfig.maxWorkPerRound - 1 ? 
+        const extraHealthCost = player.workState.workCount >= maxWorkPerRound - 1 ? 
           healthCost * 2 : 0;
+        const ability = p.workerAbilities;
         
         return {
           ...p,
           cash: p.cash + afterTax,
           health: Math.max(0, p.health - healthCost - extraHealthCost),
-          happiness: Math.min(100, p.happiness + 2 - player.workState.workCount),
+          happiness: clamp(p.happiness + happinessDelta, 0, 100),
+          workerAbilities: ability ? {
+            ...ability,
+            experience: (ability.experience ?? 0) + (player.profession === 'worker' ? 1 : 0),
+          } : ability,
           workState: {
             workCount: p.workState.workCount + 1,
             fatigueLevel: Math.min(100, p.workState.fatigueLevel + fatigueIncrease),
@@ -800,16 +792,23 @@ function gameReducer(state: GameState, action: GameAction): GameState {
       if ((player.workerAbilities?.unemployedRounds ?? 0) > 0) return state;
       if (player.health < 35 || player.workState.fatigueLevel >= 85 || (player.workState.overtimeCount ?? 0) >= 1) return state;
 
-      const wage = player.workerAbilities?.wageLevel ?? ECONOMY_BALANCE.worker.baseWage;
+      const currentJob = getWorkerCurrentJob(player, state.players);
+      if (!currentJob.overtimeAllowed || currentJob.paymentType !== 'monthly') return state;
+      const wage = player.workerAbilities?.wageLevel ?? currentJob.wage;
       const income = wage * ECONOMY_BALANCE.worker.overtimeMultiplier;
       const taxPaid = income * state.market.globalTaxRate;
       const updatedPlayers = creditTaxToGovernment(state.players.map(p => {
         if (p.id !== playerId) return p;
+        const ability = p.workerAbilities;
         return {
           ...p,
           cash: p.cash + income - taxPaid,
-          health: Math.max(0, p.health - 12),
-          happiness: Math.max(0, p.happiness - 4),
+          health: Math.max(0, p.health - currentJob.healthCost - 8),
+          happiness: Math.max(0, p.happiness - currentJob.happinessCost - 3),
+          workerAbilities: ability ? {
+            ...ability,
+            experience: (ability.experience ?? 0) + 1,
+          } : ability,
           workState: {
             workCount: p.workState.workCount + 1,
             overtimeCount: (p.workState.overtimeCount ?? 0) + 1,
@@ -851,6 +850,8 @@ function gameReducer(state: GameState, action: GameAction): GameState {
               skill: Math.min(100, ability.skill + ECONOMY_BALANCE.worker.trainingSkillGain),
               trainingSessions: ability.trainingSessions + 1,
               negotiationPower: Math.min(100, ability.negotiationPower + 6),
+              educationLevel: Math.min(4, (ability.educationLevel ?? 0) + (ability.trainingSessions % 2 === 1 ? 1 : 0)),
+              experience: (ability.experience ?? 0) + 1,
             },
           };
         }),
@@ -901,7 +902,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
     }
 
     case 'SWITCH_JOB': {
-      const { playerId } = action.payload;
+      const { playerId, jobId } = action.payload;
       const player = state.players.find(p => p.id === playerId);
       if (!player || player.profession !== 'worker') return state;
       const ability = player.workerAbilities ?? {
@@ -912,12 +913,9 @@ function gameReducer(state: GameState, action: GameAction): GameState {
         negotiationPower: 20,
       };
       if (player.cash < ECONOMY_BALANCE.worker.jobSwitchCost) return state;
-      const offer = getBestJobOffer(state.players, player, state.market.employmentRate);
-
-      const employmentBonus = (state.market.employmentRate - 60) * 0.006;
-      const skillGap = ability.skill - offer.requiredSkill;
-      const successChance = clamp(0.25 + skillGap * 0.012 + ability.negotiationPower * 0.003 + employmentBonus, 0.08, 0.92);
-      const succeeded = Math.random() < successChance;
+      const offer = getJobOffers(state.players, player, state.market.employmentRate).find(item => item.id === jobId);
+      if (!offer) return state;
+      const qualified = isQualifiedForJob(player, offer);
 
       return {
         ...state,
@@ -927,14 +925,16 @@ function gameReducer(state: GameState, action: GameAction): GameState {
           return {
             ...p,
             cash: p.cash - ECONOMY_BALANCE.worker.jobSwitchCost,
-            happiness: clamp(p.happiness + (succeeded ? 6 : -5), 0, 100),
+            happiness: clamp(p.happiness + (qualified ? 6 : -5), 0, 100),
             workerAbilities: {
               ...current,
-              wageLevel: succeeded ? Math.max(current.wageLevel, offer.wage) : current.wageLevel,
-              unemployedRounds: succeeded ? 0 : Math.max(current.unemployedRounds, 1),
+              wageLevel: qualified ? offer.wage : current.wageLevel,
+              unemployedRounds: qualified ? 0 : Math.max(current.unemployedRounds, 1),
               negotiationPower: Math.min(100, current.negotiationPower + 4),
-              employerId: succeeded ? offer.employerId : current.employerId,
-              jobTitle: succeeded ? offer.title : current.jobTitle,
+              employerId: qualified ? offer.employerId : current.employerId,
+              jobTitle: qualified ? offer.title : current.jobTitle,
+              currentJobId: qualified ? offer.id : current.currentJobId,
+              paymentType: qualified ? offer.paymentType : current.paymentType,
             },
           };
         }),
@@ -943,7 +943,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
           round: state.currentRound,
           timestamp: Date.now(),
           type: 'action',
-          message: succeeded ? `${player.name} 跳槽到 ${offer.employerName}，获得 ${offer.title}，月薪 ¥${offer.wage}` : `${player.name} 未达到 ${offer.title} 门槛，跳槽失败并短暂失业 1 个月`,
+          message: qualified ? `${player.name} 入职 ${offer.employerName}：${offer.title}，${offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥${offer.wage}` : `${player.name} 未达到 ${offer.title} 门槛，跳槽失败并短暂失业 1 个月`,
           playerId,
         }],
       };
@@ -2257,6 +2257,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
         let creditScore = player.creditScore ?? 70;
         const workerAbilities = player.workerAbilities ? { ...player.workerAbilities } : undefined;
         const investorAbilities = player.investorAbilities ? { ...player.investorAbilities } : undefined;
+        let monthlyJobFatigueCost = 0;
 
         // 1. 统一投资收益（投资者有技能加成）
         const investorSkillBonus = investorAbilities 
@@ -2380,6 +2381,20 @@ function gameReducer(state: GameState, action: GameAction): GameState {
               );
             }
           } else {
+            const currentJob = getWorkerCurrentJob({ ...player, workerAbilities }, state.players);
+            if (
+              currentJob.paymentType === 'monthly'
+              && player.workState.monthlySalaryPaidRound !== state.currentRound
+            ) {
+              const monthlyIncome = Math.round(currentJob.wage * (1 + player.permanentBonuses.incomeBonus));
+              const salaryTax = Math.max(0, monthlyIncome * newMarket.globalTaxRate);
+              newCash += monthlyIncome - salaryTax;
+              taxRevenue += salaryTax;
+              newHealth -= currentJob.healthCost;
+              newHappiness -= currentJob.happinessCost;
+              monthlyJobFatigueCost = currentJob.fatigueCost;
+              workerAbilities.experience = (workerAbilities.experience ?? 0) + 1;
+            }
             const laborStress = Math.max(0, 75 - state.market.employmentRate) / 75;
             const unemploymentRisk = ECONOMY_BALANCE.worker.unemploymentBaseRisk + laborStress * ECONOMY_BALANCE.worker.unemploymentLowEmploymentRisk;
             if (Math.random() < unemploymentRisk) {
@@ -2544,7 +2559,10 @@ function gameReducer(state: GameState, action: GameAction): GameState {
           workState: {
             workCount: 0,
             overtimeCount: 0,
-            fatigueLevel: Math.max(0, player.workState.fatigueLevel - 20),
+            fatigueLevel: Math.max(0, player.workState.fatigueLevel - 20 + monthlyJobFatigueCost),
+            monthlySalaryPaidRound: player.profession === 'worker' && workerAbilities?.paymentType === 'monthly'
+              ? state.currentRound
+              : player.workState.monthlySalaryPaidRound,
           },
           hasActedThisRound: false,
           rentPaid: false,

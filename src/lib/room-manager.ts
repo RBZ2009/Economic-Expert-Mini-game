@@ -29,6 +29,7 @@ export interface GameRoom {
   maxPlayers: number;
   hostId: string;
   gameMode: GameMode;
+  allowMidGameJoin: boolean;
   gameState?: GameState;
   createdAt: number;
   updatedAt: number;
@@ -93,6 +94,7 @@ class RoomManager {
     return {
       ...storedRoom,
       gameMode: storedRoom.gameMode ?? 'professional',
+      allowMidGameJoin: storedRoom.allowMidGameJoin ?? false,
       players: storedRoom.players.map(player => ({
         ...player,
         isConnected: false,
@@ -150,6 +152,7 @@ class RoomManager {
       maxPlayers: request.maxPlayers || 10,
       hostId: playerId,
       gameMode: request.gameMode ?? 'professional',
+      allowMidGameJoin: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       actionLog: [],
@@ -180,7 +183,9 @@ class RoomManager {
         this.persistRooms();
         return { success: true, room, playerId: reconnectingPlayer.id };
       }
-      return { success: false, error: '游戏已开始，无法加入' };
+      if (!room.allowMidGameJoin) {
+        return { success: false, error: '游戏已开始，无法加入' };
+      }
     }
 
     if (room.players.length >= room.maxPlayers) {
@@ -236,6 +241,13 @@ class RoomManager {
 
     // 移除玩家
     room.players = room.players.filter(p => p.id !== playerId);
+    if (room.gameState) {
+      room.gameState = {
+        ...room.gameState,
+        players: room.gameState.players.filter(player => player.id !== playerId),
+        roundCompletedPlayers: room.gameState.roundCompletedPlayers.filter(id => id !== playerId),
+      };
+    }
     this.playerConnections.delete(deviceId);
 
     // 如果房间空了，删除房间
@@ -255,6 +267,63 @@ class RoomManager {
     this.persistRooms();
 
     return { success: true, roomId };
+  }
+
+  dissolveRoom(deviceId: string): { success: boolean; roomId?: string; error?: string } {
+    const connection = this.playerConnections.get(deviceId);
+    if (!connection) return { success: false, error: '不在房间中' };
+
+    const room = this.rooms.get(connection.roomId);
+    if (!room) {
+      this.playerConnections.delete(deviceId);
+      return { success: false, error: '房间不存在' };
+    }
+
+    if (room.hostId !== connection.playerId) {
+      return { success: false, error: '只有房主可以解散房间' };
+    }
+
+    const roomId = room.id;
+    this.deleteRoom(roomId);
+    return { success: true, roomId };
+  }
+
+  transferHost(deviceId: string, targetPlayerId: string): { success: boolean; room?: GameRoom; error?: string } {
+    const connection = this.playerConnections.get(deviceId);
+    if (!connection) return { success: false, error: '不在房间中' };
+
+    const room = this.rooms.get(connection.roomId);
+    if (!room) return { success: false, error: '房间不存在' };
+    if (room.hostId !== connection.playerId) return { success: false, error: '只有房主可以转让房主' };
+
+    const target = room.players.find(player => player.id === targetPlayerId);
+    if (!target) return { success: false, error: '目标玩家不存在' };
+    if (target.id === room.hostId) return { success: false, error: '该玩家已经是房主' };
+
+    for (const player of room.players) {
+      player.isHost = player.id === target.id;
+    }
+    room.hostId = target.id;
+    room.updatedAt = Date.now();
+    this.persistRooms();
+    return { success: true, room };
+  }
+
+  updateRoomSettings(deviceId: string, settings: { allowMidGameJoin?: boolean }): { success: boolean; room?: GameRoom; error?: string } {
+    const connection = this.playerConnections.get(deviceId);
+    if (!connection) return { success: false, error: '不在房间中' };
+
+    const room = this.rooms.get(connection.roomId);
+    if (!room) return { success: false, error: '房间不存在' };
+    if (room.hostId !== connection.playerId) return { success: false, error: '只有房主可以修改房间设置' };
+
+    if (typeof settings.allowMidGameJoin === 'boolean') {
+      room.allowMidGameJoin = settings.allowMidGameJoin;
+    }
+
+    room.updatedAt = Date.now();
+    this.persistRooms();
+    return { success: true, room };
   }
 
   // 设置玩家职业
