@@ -2,12 +2,11 @@
 
 import React, { useState } from 'react';
 import { useRoom } from '@/contexts/RoomContext';
-import { PlayerProfession, PROFESSION_CONFIGS, PLAYER_COLORS } from '@/types/game';
+import { PlayerProfession, PROFESSION_CONFIGS } from '@/types/game';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Input } from '@/components/ui/input';
 
 const ALL_PROFESSIONS: PlayerProfession[] = ['worker', 'entrepreneur', 'investor', 'government'];
 
@@ -16,7 +15,6 @@ export function LobbyPage() {
     room, 
     playerId, 
     players, 
-    currentPlayerId, 
     setProfession, 
     setReady, 
     startGame, 
@@ -112,7 +110,7 @@ export function LobbyPage() {
                 <span>👥</span> 玩家列表 ({players.length}/{room.maxPlayers})
               </h3>
               
-              {players.map((player, index) => {
+              {players.map((player) => {
                 const isMe = player.id === playerId;
                 const professionConfig = player.profession 
                   ? PROFESSION_CONFIGS[player.profession as PlayerProfession]

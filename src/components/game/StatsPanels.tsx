@@ -115,7 +115,7 @@ export function MarketStats() {
 }
 
 export function PlayerStats() {
-  const { state, getCurrentPlayer, calculateScore } = useGame();
+  const { getCurrentPlayer, calculateScore } = useGame();
   const currentPlayer = getCurrentPlayer();
 
   if (!currentPlayer) return null;

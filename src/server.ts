@@ -10,7 +10,7 @@ import type { IncomingMessage } from 'http';
 import type { Duplex } from 'stream';
 import { setupGameHandler } from './ws-handlers/game';
 
-const dev = process.env.COZE_PROJECT_ENV !== 'PROD';
+const dev = process.env.NODE_ENV !== 'production';
 const hostname = '0.0.0.0';
 const PORT = Number(process.env.DEPLOY_RUN_PORT) || 5000;
 
@@ -67,7 +67,7 @@ app.prepare().then(() => {
   server.listen(PORT, () => {
     console.log(
       `> Server listening at http://${hostname}:${PORT} as ${
-        dev ? 'development' : process.env.COZE_PROJECT_ENV
+        dev ? 'development' : 'production'
       }`
     );
     console.log('> WebSocket endpoints:');
