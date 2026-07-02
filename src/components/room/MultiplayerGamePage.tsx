@@ -535,6 +535,7 @@ function FullActionPanel({ adapter }: { adapter: ActionAdapter }) {
 
 // ==================== 工作面板 ====================
 function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player; gameState: GameState; sendAction: SendGameAction }) {
+  const [showJobOffers, setShowJobOffers] = useState(false);
   const profession = PROFESSION_CONFIGS[myPlayer.profession] as ProfessionConfig;
   const workerAbilities = myPlayer.workerAbilities;
   const isUnemployed = (workerAbilities?.unemployedRounds ?? 0) > 0;
@@ -632,41 +633,48 @@ function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player
           </Button>
         </div>
         <div className="mt-4 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <h5 className="text-sm font-medium">跳槽机会</h5>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="min-w-28"
+              onClick={() => setShowJobOffers(prev => !prev)}
+            >
+              {showJobOffers ? '收起跳槽' : '跳槽'}
+            </Button>
             <span className="text-xs text-muted-foreground">申请成本 ¥{formatCurrency(ECONOMY_BALANCE.worker.jobSwitchCost)}</span>
           </div>
-          {jobOffers.map(offer => {
-            const qualified = isQualifiedForJob(myPlayer, offer);
-            const isCurrent = offer.id === workerAbilities?.currentJobId;
-            return (
-              <div key={offer.id} className="rounded-md border p-2 text-xs">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <div className="font-medium">{offer.title}</div>
-                    <div className="text-muted-foreground">{offer.employerName}</div>
+          {showJobOffers && jobOffers.map(offer => {
+              const qualified = isQualifiedForJob(myPlayer, offer);
+              const isCurrent = offer.id === workerAbilities?.currentJobId;
+              return (
+                <div key={offer.id} className="rounded-md border p-2 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <div className="font-medium">{offer.title}</div>
+                      <div className="text-muted-foreground">{offer.employerName}</div>
+                    </div>
+                    <Badge variant={qualified ? 'default' : 'secondary'}>{qualified ? '符合' : '未达标'}</Badge>
                   </div>
-                  <Badge variant={qualified ? 'default' : 'secondary'}>{qualified ? '符合' : '未达标'}</Badge>
+                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
+                    <span>{offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥{formatCurrency(offer.wage)}</span>
+                    <span>{offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound} 次/轮` : '自动发薪'}</span>
+                    <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
+                    <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
+                  </div>
+                  <p className="mt-1 text-muted-foreground">{offer.description}</p>
+                  <Button
+                    size="sm"
+                    variant={isCurrent ? 'secondary' : 'outline'}
+                    className="mt-2 w-full"
+                    disabled={isCurrent || !qualified || myPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
+                    onClick={() => sendAction({ type: 'SWITCH_JOB', payload: { playerId: myPlayer.id, jobId: offer.id } })}
+                  >
+                    {isCurrent ? '当前岗位' : qualified ? '申请岗位' : '门槛不足'}
+                  </Button>
                 </div>
-                <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
-                  <span>{offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥{formatCurrency(offer.wage)}</span>
-                  <span>{offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound} 次/轮` : '自动发薪'}</span>
-                  <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
-                  <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
-                </div>
-                <p className="mt-1 text-muted-foreground">{offer.description}</p>
-                <Button
-                  size="sm"
-                  variant={isCurrent ? 'secondary' : 'outline'}
-                  className="mt-2 w-full"
-                  disabled={isCurrent || !qualified || myPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
-                  onClick={() => sendAction({ type: 'SWITCH_JOB', payload: { playerId: myPlayer.id, jobId: offer.id } })}
-                >
-                  {isCurrent ? '当前岗位' : qualified ? '申请岗位' : '门槛不足'}
-                </Button>
-              </div>
-            );
-          })}
+              );
+            })}
         </div>
       </div>
     );

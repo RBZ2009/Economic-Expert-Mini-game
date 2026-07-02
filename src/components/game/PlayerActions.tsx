@@ -421,6 +421,7 @@ function BankPanel() {
 // 工作卡片组件
 function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarning: boolean }) {
   const { state, dispatch, getCurrentPlayer } = useGame();
+  const [showJobOffers, setShowJobOffers] = useState(false);
   const currentPlayer = getCurrentPlayer();
   if (!currentPlayer) return null;
 
@@ -491,43 +492,52 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
       </div>
       {currentPlayer.profession === 'worker' && (
         <div className="mt-4 space-y-2">
-          <div className="flex items-center justify-between gap-2">
-            <h5 className="text-sm font-medium">跳槽机会</h5>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="min-w-28"
+              onClick={() => setShowJobOffers(prev => !prev)}
+            >
+              {showJobOffers ? '收起跳槽' : '跳槽'}
+            </Button>
             <span className="text-xs text-muted-foreground">申请成本 ¥{formatCurrency(ECONOMY_BALANCE.worker.jobSwitchCost)}</span>
           </div>
-          <div className="grid gap-2 xl:grid-cols-2">
-            {jobOffers.map(offer => {
-              const qualified = isQualifiedForJob(currentPlayer, offer);
-              const isCurrent = offer.id === workerAbility?.currentJobId;
-              return (
-                <div key={offer.id} className="rounded-md border p-2 text-xs">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="font-medium">{offer.title}</div>
-                      <div className="text-muted-foreground">{offer.employerName}</div>
+          {showJobOffers && (
+            <div className="grid gap-2 xl:grid-cols-2">
+              {jobOffers.map(offer => {
+                const qualified = isQualifiedForJob(currentPlayer, offer);
+                const isCurrent = offer.id === workerAbility?.currentJobId;
+                return (
+                  <div key={offer.id} className="rounded-md border p-2 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-medium">{offer.title}</div>
+                        <div className="text-muted-foreground">{offer.employerName}</div>
+                      </div>
+                      <Badge variant={qualified ? 'default' : 'secondary'}>{qualified ? '符合' : '未达标'}</Badge>
                     </div>
-                    <Badge variant={qualified ? 'default' : 'secondary'}>{qualified ? '符合' : '未达标'}</Badge>
+                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
+                      <span>{offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥{formatCurrency(offer.wage)}</span>
+                      <span>次数 {offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound}/轮` : '自动发薪'}</span>
+                      <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
+                      <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
+                    </div>
+                    <p className="mt-1 text-muted-foreground">{offer.description}</p>
+                    <Button
+                      size="sm"
+                      variant={isCurrent ? 'secondary' : 'outline'}
+                      className="mt-2 w-full"
+                      disabled={isCurrent || !qualified || currentPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
+                      onClick={() => dispatch({ type: 'SWITCH_JOB', payload: { playerId: currentPlayer.id, jobId: offer.id } })}
+                    >
+                      {isCurrent ? '当前岗位' : qualified ? '申请岗位' : '门槛不足'}
+                    </Button>
                   </div>
-                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-muted-foreground">
-                    <span>{offer.paymentType === 'monthly' ? '月薪' : '时薪'} ¥{formatCurrency(offer.wage)}</span>
-                    <span>次数 {offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound}/轮` : '自动发薪'}</span>
-                    <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
-                    <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
-                  </div>
-                  <p className="mt-1 text-muted-foreground">{offer.description}</p>
-                  <Button
-                    size="sm"
-                    variant={isCurrent ? 'secondary' : 'outline'}
-                    className="mt-2 w-full"
-                    disabled={isCurrent || !qualified || currentPlayer.cash < ECONOMY_BALANCE.worker.jobSwitchCost}
-                    onClick={() => dispatch({ type: 'SWITCH_JOB', payload: { playerId: currentPlayer.id, jobId: offer.id } })}
-                  >
-                    {isCurrent ? '当前岗位' : qualified ? '申请岗位' : '门槛不足'}
-                  </Button>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>
