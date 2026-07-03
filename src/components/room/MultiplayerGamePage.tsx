@@ -26,7 +26,7 @@ import {
   PolicyType,
   ECONOMY_BALANCE,
 } from '@/types/game';
-import { estimateProductSales, getProductInventory, productionGoodTypes } from '@/components/game/company-helpers';
+import { estimateProductSales, findBestSaleOption, getProductInventory, productionGoodTypes } from '@/components/game/company-helpers';
 import { getJobOffers, getWorkerCurrentJob, getWorkerEducationLevel, getWorkerExperience, isQualifiedForJob } from '@/game/jobs';
 import {
   getCompanyCapacityUnits,
@@ -554,7 +554,8 @@ function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player
   const workLimit = currentJob?.paymentType === 'hourly' ? currentJob.maxWorkPerRound : profession.maxWorkPerRound;
   const workRemaining = Math.max(0, workLimit - myPlayer.workState.workCount);
   const isMonthlyJob = currentJob?.paymentType === 'monthly';
-  const canWork = workRemaining > 0 && !isUnemployed && !isMonthlyJob;
+  const forcedRestRounds = myPlayer.workState.forcedRestRounds ?? 0;
+  const canWork = workRemaining > 0 && !isUnemployed && !isMonthlyJob && forcedRestRounds <= 0 && myPlayer.health >= 25;
   const wageLevel = currentJob?.wage ?? workerAbilities?.wageLevel ?? profession.baseIncome;
 
   if (myPlayer.profession === 'worker') {
@@ -584,6 +585,11 @@ function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player
             <div>消耗：健康 -{currentJob.healthCost} / 幸福 -{currentJob.happinessCost} / 疲劳 +{currentJob.fatigueCost}</div>
           </div>
         )}
+        {forcedRestRounds > 0 && (
+          <div className="mb-3 rounded-md border border-red-300 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-100">
+            强制休息中，剩余 {forcedRestRounds} 轮，期间无法进行任何操作。
+          </div>
+        )}
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm">剩余工作次数: {workRemaining}/{workLimit}</span>
           {myPlayer.workState.fatigueLevel > 50 && (
@@ -597,6 +603,11 @@ function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player
         {isUnemployed && (
           <p className="text-xs text-red-600 mb-2">
             当前失业，剩余 {workerAbilities?.unemployedRounds} 个月，可做副业或等待再就业。
+          </p>
+        )}
+        {myPlayer.health < 25 && forcedRestRounds <= 0 && (
+          <p className="text-xs text-red-600 mb-2">
+            健康值过低，当前不能工作。
           </p>
         )}
         <Button 
@@ -709,6 +720,7 @@ function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player
 // ==================== 健康面板 ====================
 function HealthPanel({ myPlayer, sendAction, gameState }: { myPlayer: Player; sendAction: SendGameAction; gameState: GameState }) {
   const medicinePrice = gameState.market.goods.healthcare?.currentPrice || 300;
+  const forcedRestRounds = myPlayer.workState.forcedRestRounds ?? 0;
   
   return (
     <div className="p-3 border rounded-lg">
@@ -719,12 +731,16 @@ function HealthPanel({ myPlayer, sendAction, gameState }: { myPlayer: Player; se
           {myPlayer.health < 50 && (
             <p className="text-xs text-red-500">健康状况不佳！</p>
           )}
+          {forcedRestRounds > 0 && (
+            <p className="text-xs text-red-500">强制休息剩余 {forcedRestRounds} 轮，结束后健康恢复到 30。</p>
+          )}
+          <p className="text-xs text-muted-foreground">每轮会自然恢复一些健康；疲劳过高会额外伤害健康。</p>
         </div>
         <Button 
           size="sm" 
           variant="outline"
           disabled={myPlayer.cash < medicinePrice}
-          onClick={() => sendAction({ type: 'BUY_GOOD', payload: { goodType: 'healthcare', quantity: 1 } })}
+          onClick={() => sendAction({ type: 'BUY_GOOD', payload: { playerId: myPlayer.id, goodType: 'healthcare', quantity: 1 } })}
         >
           🏥 药品 ¥{formatCurrency(medicinePrice)}
         </Button>
@@ -1456,6 +1472,18 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           <h5 className="font-medium mb-2 flex items-center gap-2">
             📦 原材料采购
           </h5>
+          <div className="mb-2 grid grid-cols-2 gap-2 text-xs">
+            <div className="rounded bg-muted/40 p-2">
+              <div className="text-muted-foreground">市场参考价</div>
+              <div className="font-medium">¥{formatCurrency(gameState.market.priceAnchors[company.productionType].referencePrice)}</div>
+            </div>
+            <div className="rounded bg-muted/40 p-2">
+              <div className="text-muted-foreground">库存/短缺</div>
+              <div className="font-medium">
+                {formatPercent(gameState.market.inventoryPressure[company.productionType], 1)}% / {formatPercent(gameState.market.shortageIndex[company.productionType], 1)}%
+              </div>
+            </div>
+          </div>
           
           <div className="flex gap-2">
             {[50, 200].map(quantity => {
@@ -1744,9 +1772,8 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
               variant="outline"
               disabled={saleInventory === 0 || hasSoldThisRound}
               onClick={() => {
-                const priceInput = document.getElementById('sell-price') as HTMLInputElement;
-                const price = parseInt(priceInput?.value) || saleConfig.baseSellingPrice;
-                sendAction({ type: 'SELL_COMPANY_PRODUCT', payload: { playerId: myPlayer.id, quantity: saleInventory, pricePerUnit: price, productType: saleProductType } });
+                const bestOption = findBestSaleOption(gameState.market, company, saleProductType, saleInventory);
+                sendAction({ type: 'SELL_COMPANY_PRODUCT', payload: { playerId: myPlayer.id, quantity: saleInventory, pricePerUnit: bestOption.price, productType: saleProductType } });
               }}
             >
               全部出售该商品
@@ -1826,6 +1853,16 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
             <div className="flex justify-between">
               <span>机器折旧:</span>
               <span className="text-red-500">-¥{formatCurrency(company.machines * MACHINE_CONFIGS.basic.maintenanceCost)}/月</span>
+            </div>
+            <div className="flex justify-between">
+              <span>固定与持有成本:</span>
+              <span className="text-red-500">-¥{formatCurrency(company.fixedCosts + company.inventoryHoldingCost + company.depreciation)}</span>
+            </div>
+            <div className="flex justify-between">
+              <span>营业利润:</span>
+              <span className={company.incomeStatement.operatingProfit >= 0 ? 'text-green-600' : 'text-red-600'}>
+                {company.incomeStatement.operatingProfit >= 0 ? '+' : '-'}¥{formatCurrency(Math.abs(company.incomeStatement.operatingProfit))}
+              </span>
             </div>
             <div className="flex justify-between border-t pt-1 font-medium">
               <span>{currentRoundSales.length > 0 ? '本轮实际毛利:' : '预计毛利:'}</span>

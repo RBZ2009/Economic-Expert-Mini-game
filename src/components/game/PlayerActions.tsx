@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
 import { GoodType, PROFESSION_CONFIGS, INVESTMENT_CONFIGS, MACHINE_CONFIGS, HousingTier, HOUSING_CONFIGS, InvestmentType, POLICY_CONFIGS, PolicyType, formatCurrency, formatPercent, formatNumber, CYCLE_NAMES, CYCLE_MULTIPLIERS, PRODUCTION_CONFIGS, ECONOMY_BALANCE, ProductionGoodType } from '@/types/game';
-import { estimateProductSales, getProductInventory, productionGoodTypes } from './company-helpers';
+import { estimateProductSales, findBestSaleOption, getProductInventory, productionGoodTypes } from './company-helpers';
 import { ActionSection, ActionWorkspace, MetricStrip, StatusBadge, type ActionAdapter } from './workbench';
 import { getJobOffers, getWorkerCurrentJob, getWorkerEducationLevel, getWorkerExperience, isQualifiedForJob } from '@/game/jobs';
 import {
@@ -56,7 +56,8 @@ export function PlayerActions() {
   const profession = PROFESSION_CONFIGS[currentPlayer.profession];
   const workRemaining = profession.maxWorkPerRound - currentPlayer.workState.workCount;
   const isUnemployed = (currentPlayer.workerAbilities?.unemployedRounds ?? 0) > 0;
-  const canWork = workRemaining > 0 && !isUnemployed;
+  const forcedRestRounds = currentPlayer.workState.forcedRestRounds ?? 0;
+  const canWork = workRemaining > 0 && !isUnemployed && forcedRestRounds <= 0 && currentPlayer.health >= 25;
   const fatigueWarning = currentPlayer.workState.fatigueLevel > 50;
   const isWorker = currentPlayer.profession === 'worker';
   const isSimpleMode = state.gameMode === 'simple';
@@ -121,6 +122,11 @@ export function PlayerActions() {
             { label: '疲劳', value: `${formatNumber(currentPlayer.workState.fatigueLevel)}/100`, tone: fatigueWarning ? 'warn' : 'default' },
           ]}
         />
+        {forcedRestRounds > 0 && (
+          <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/30 dark:text-red-100">
+            健康值过低，当前需要强制休息 {forcedRestRounds} 轮。休息结束后健康会恢复到 30。
+          </div>
+        )}
         {isWorker && <WorkCard canWork={canWork} fatigueWarning={fatigueWarning} />}
           
         <div className="p-3 border rounded-lg">
@@ -141,6 +147,7 @@ export function PlayerActions() {
                 {currentPlayer.health < 50 && (
                   <p className="text-xs text-red-500">健康状况不佳！</p>
                 )}
+                <p className="text-xs text-muted-foreground">每轮会自然恢复一些健康；疲劳过高会反过来伤害健康。</p>
               </div>
               <Button 
                 size="sm" 
@@ -446,6 +453,7 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
   const workLimit = currentJob?.paymentType === 'hourly' ? currentJob.maxWorkPerRound : profession.maxWorkPerRound;
   const workRemaining = Math.max(0, workLimit - currentPlayer.workState.workCount);
   const canManualWork = canWork && !isMonthlyJob && workRemaining > 0;
+  const forcedRestRounds = currentPlayer.workState.forcedRestRounds ?? 0;
 
   const penalty = currentPlayer.workState.workCount > 0 ? 
     (1 - currentPlayer.workState.workCount * 0.12).toFixed(1)
@@ -469,6 +477,8 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
               <p>技能 {workerAbility.skill} / 学历 {getWorkerEducationLevel(currentPlayer)} / 经验 {getWorkerExperience(currentPlayer)} / 剩余工作 {workRemaining}</p>
             )}
             {isUnemployed && <p className="text-red-500">当前失业，剩余 {workerAbility?.unemployedRounds} 个月，可尝试副业或等待再就业</p>}
+            {forcedRestRounds > 0 && <p className="text-red-500">强制休息中，剩余 {forcedRestRounds} 轮</p>}
+            {currentPlayer.health < 25 && forcedRestRounds <= 0 && <p className="text-red-500">健康值过低，不能工作</p>}
           </div>
         </div>
         <div className="flex min-w-48 flex-col gap-2">
@@ -1012,6 +1022,22 @@ function EntrepreneurActions() {
           <div className="flex justify-between">
             <span>产品质量:</span>
             <span className="font-medium">{formatPercent(company.productQuality, 0)}%</span>
+          </div>
+          <div className="flex justify-between">
+            <span>行业:</span>
+            <span className="font-medium">{PRODUCTION_CONFIGS[company.productionType].name}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>市场参考价:</span>
+            <span className="font-medium">¥{formatCurrency(state.market.priceAnchors[company.productionType].referencePrice)}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>库存压力:</span>
+            <span className="font-medium">{formatPercent(state.market.inventoryPressure[company.productionType], 1)}%</span>
+          </div>
+          <div className="flex justify-between">
+            <span>短缺指数:</span>
+            <span className="font-medium">{formatPercent(state.market.shortageIndex[company.productionType], 1)}%</span>
           </div>
         </div>
       </div>
@@ -1612,11 +1638,10 @@ function EntrepreneurActions() {
                 variant="outline"
                 disabled={saleInventory === 0 || hasSoldThisRound}
                 onClick={() => {
-                  const priceInput = document.getElementById('sell-price-local') as HTMLInputElement;
-                  const price = parseInt(priceInput?.value) || saleConfig.baseSellingPrice;
+                  const bestOption = findBestSaleOption(state.market, company, saleProductType, saleInventory);
                   dispatch({ 
-                    type: 'SELL_COMPANY_PRODUCT', 
-                    payload: { playerId: currentPlayer.id, quantity: saleInventory, pricePerUnit: price, productType: saleProductType } 
+                    type: 'SELL_COMPANY_PRODUCT',
+                    payload: { playerId: currentPlayer.id, quantity: saleInventory, pricePerUnit: bestOption.price, productType: saleProductType }
                   });
                 }}
               >
@@ -1666,6 +1691,16 @@ function EntrepreneurActions() {
               <div className="flex justify-between">
                 <span>生产成本:</span>
                 <span>-¥{formatCurrency(company.cashFlow.productionCosts)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>固定与持有成本:</span>
+                <span>-¥{formatCurrency(company.fixedCosts + company.inventoryHoldingCost + company.depreciation)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>营业利润:</span>
+                <span className={company.incomeStatement.operatingProfit >= 0 ? 'text-green-600' : 'text-red-600'}>
+                  {company.incomeStatement.operatingProfit >= 0 ? '+' : ''}¥{formatCurrency(company.incomeStatement.operatingProfit)}
+                </span>
               </div>
             </div>
             <div className="mt-3 pt-3 border-t">

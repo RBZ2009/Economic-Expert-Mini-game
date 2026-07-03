@@ -58,6 +58,14 @@ export type LoanType =
   | 'mortgage'
   | 'business';
 
+export type IndustryType =
+  | 'food'
+  | 'daily_necessities'
+  | 'entertainment'
+  | 'luxury'
+  | 'public_service'
+  | 'finance';
+
 // 经济周期（美林时钟）
 export type EconomicCycle = 
   | 'overheating'     // 过热期 - 股票📈/债券📉/黄金📉/存款📉
@@ -492,6 +500,7 @@ export interface WorkState {
   lastWorkTime?: number;
   overtimeCount?: number;
   monthlySalaryPaidRound?: number;
+  forcedRestRounds?: number;
 }
 
 // ------------------- 职业配置 -------------------
@@ -596,6 +605,11 @@ export interface Company {
   profit: number;
   marketShare: number;
   stockPrice: number;
+  fixedCosts: number;
+  depreciation: number;
+  financingCosts: number;
+  inventoryHoldingCost: number;
+  industry: IndustryType;
   
   // 现金流记录（每月结算时更新）
   cashFlow: {
@@ -606,6 +620,22 @@ export interface Company {
     wages: number;         // 工资支出
     productionCosts: number; // 生产成本（包含原材料和加工费）
     otherCosts: number;    // 其他支出
+  };
+  balanceSheet: {
+    cash: number;
+    debt: number;
+    equity: number;
+    inventoryValue: number;
+    retainedEarnings: number;
+  };
+  incomeStatement: {
+    revenue: number;
+    cogs: number;
+    grossProfit: number;
+    operatingProfit: number;
+    netProfit: number;
+    taxes: number;
+    interestExpense: number;
   };
   
   // 运营指标
@@ -662,13 +692,13 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     description: '生活必需品，需求稳定',
     baseProductionCost: 3,
     baseMaterialCost: 8,
-    baseSellingPrice: 42,
-    minSellingPrice: 30,
-    maxSellingPrice: 65,
+    baseSellingPrice: 36,
+    minSellingPrice: 28,
+    maxSellingPrice: 52,
     materialConsumption: 1,
     capacityCost: 1,
-    marketDemand: 1.0,
-    demandElasticity: 0.7,
+    marketDemand: 1.08,
+    demandElasticity: 0.55,
   },
   food: {
     id: 'food',
@@ -677,13 +707,13 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     description: '食品类商品，消耗较快',
     baseProductionCost: 3,
     baseMaterialCost: 7,
-    baseSellingPrice: 36,
-    minSellingPrice: 25,
-    maxSellingPrice: 60,
+    baseSellingPrice: 30,
+    minSellingPrice: 22,
+    maxSellingPrice: 42,
     materialConsumption: 0.9,
     capacityCost: 0.75,
-    marketDemand: 1.2,
-    demandElasticity: 0.45,
+    marketDemand: 1.28,
+    demandElasticity: 0.35,
   },
   entertainment: {
     id: 'entertainment',
@@ -692,13 +722,13 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     description: '娱乐产品，需求波动大',
     baseProductionCost: 8,
     baseMaterialCost: 13,
-    baseSellingPrice: 82,
-    minSellingPrice: 45,
-    maxSellingPrice: 120,
+    baseSellingPrice: 74,
+    minSellingPrice: 48,
+    maxSellingPrice: 108,
     materialConsumption: 1.4,
     capacityCost: 1.8,
-    marketDemand: 0.8,
-    demandElasticity: 1.0,
+    marketDemand: 0.95,
+    demandElasticity: 0.95,
   },
   luxury: {
     id: 'luxury',
@@ -707,13 +737,13 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     description: '高端商品，利润高但需求低',
     baseProductionCost: 18,
     baseMaterialCost: 28,
-    baseSellingPrice: 180,
-    minSellingPrice: 90,
-    maxSellingPrice: 240,
+    baseSellingPrice: 168,
+    minSellingPrice: 110,
+    maxSellingPrice: 225,
     materialConsumption: 2.6,
     capacityCost: 3.4,
-    marketDemand: 0.5,
-    demandElasticity: 1.4,
+    marketDemand: 0.62,
+    demandElasticity: 1.3,
   },
 };
 
@@ -815,6 +845,14 @@ export interface Player {
     paymentType?: 'monthly' | 'hourly';
     educationLevel?: number;
     experience?: number;
+    lastNegotiationAsk?: number;
+    lastNegotiationOutcome?: 'rejected' | 'small_raise' | 'normal_raise' | 'strong_raise';
+    contractType?: 'hourly' | 'monthly';
+    hoursPerRound?: number;
+    benefits?: number;
+    promotionTrack?: string;
+    jobSecurity?: number;
+    industry?: IndustryType;
   };
   
   company?: Company;
@@ -930,6 +968,18 @@ export interface Market {
     skillPremium: number;
     minimumWage: number;
   };
+  households: HouseholdSegment[];
+  npcFirms: NpcFirm[];
+  creditConditions: CreditState;
+  macroState: MacroState;
+  priceAnchors: Record<GoodType, {
+    referencePrice: number;
+    lastClearingPrice: number;
+    inventoryPressure: number;
+    shortageIndex: number;
+  }>;
+  inventoryPressure: Record<GoodType, number>;
+  shortageIndex: Record<GoodType, number>;
   supplyDemand: Record<GoodType, { supply: number; demand: number }>;
   
   // 经济周期
@@ -964,6 +1014,49 @@ export interface RandomEvent {
   duration?: number;
   remainingDuration?: number;
   warning?: string;
+  transmissionChannels?: Array<'household_income' | 'enterprise_cost' | 'credit' | 'external_demand' | 'logistics' | 'policy_expectation'>;
+}
+
+export interface HouseholdSegment {
+  id: string;
+  label: string;
+  populationShare: number;
+  averageIncome: number;
+  disposableIncome: number;
+  savingsRate: number;
+  confidence: number;
+  essentialShare: number;
+  discretionaryShare: number;
+  demandBias: Partial<Record<GoodType, number>>;
+}
+
+export interface NpcFirm {
+  id: string;
+  industry: IndustryType;
+  employees: number;
+  capacity: number;
+  wageOffer: number;
+  financialHealth: number;
+  plannedSupply: number;
+  pricingPower: number;
+}
+
+export interface CreditState {
+  householdCreditTightness: number;
+  businessCreditTightness: number;
+  defaultRate: number;
+  lendingSentiment: number;
+  mortgageApprovalRate: number;
+}
+
+export interface MacroState {
+  consumerConfidence: number;
+  businessConfidence: number;
+  externalDemandIndex: number;
+  fiscalPressure: number;
+  unemploymentPressure: number;
+  inflationExpectation: number;
+  socialMobilityIndex: number;
 }
 
 export interface PendingPolicy {

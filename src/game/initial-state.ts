@@ -2,6 +2,8 @@ import {
   Company,
   GameMode,
   GameState,
+  HouseholdSegment,
+  NpcFirm,
   Player,
   PlayerProfession,
   WorkState,
@@ -21,7 +23,7 @@ export interface InitialRoomPlayer {
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
 function createInitialWorkState(): WorkState {
-  return { workCount: 0, fatigueLevel: 0 };
+  return { workCount: 0, fatigueLevel: 0, forcedRestRounds: 0 };
 }
 
 function createInitialCompany(ownerId: string): Company {
@@ -49,6 +51,11 @@ function createInitialCompany(ownerId: string): Company {
     profit: 0,
     marketShare: 5,
     stockPrice: 100,
+    fixedCosts: 2400,
+    depreciation: 800,
+    financingCosts: 0,
+    inventoryHoldingCost: 0,
+    industry: 'daily_necessities',
     cashFlow: {
       initial: ECONOMY_BALANCE.startingCash.entrepreneur,
       income: 0,
@@ -57,6 +64,22 @@ function createInitialCompany(ownerId: string): Company {
       wages: 0,
       productionCosts: 0,
       otherCosts: 0,
+    },
+    balanceSheet: {
+      cash: ECONOMY_BALANCE.startingCash.entrepreneur,
+      debt: 0,
+      equity: ECONOMY_BALANCE.startingCash.entrepreneur,
+      inventoryValue: 0,
+      retainedEarnings: 0,
+    },
+    incomeStatement: {
+      revenue: 0,
+      cogs: 0,
+      grossProfit: 0,
+      operatingProfit: 0,
+      netProfit: 0,
+      taxes: 0,
+      interestExpense: 0,
     },
     efficiency: 100,
     morale: 70,
@@ -138,6 +161,12 @@ export function createInitialPlayer(
       experience: 0,
       employerId: 'npc_service',
       jobTitle: '小时工服务员',
+      contractType: 'hourly',
+      hoursPerRound: 8,
+      benefits: 0.08,
+      promotionTrack: '服务业->制造业->技能岗',
+      jobSecurity: 55,
+      industry: 'public_service',
     };
   }
 
@@ -182,6 +211,56 @@ export function createInitialPlayer(
   return player;
 }
 
+function createInitialHouseholds(): HouseholdSegment[] {
+  return [
+    {
+      id: 'low_income',
+      label: '低收入家庭',
+      populationShare: 0.45,
+      averageIncome: 5200,
+      disposableIncome: 3900,
+      savingsRate: 0.04,
+      confidence: 52,
+      essentialShare: 0.72,
+      discretionaryShare: 0.18,
+      demandBias: { food: 1.18, daily_necessities: 1.12, entertainment: 0.65, luxury: 0.18 },
+    },
+    {
+      id: 'middle_income',
+      label: '中等收入家庭',
+      populationShare: 0.4,
+      averageIncome: 9800,
+      disposableIncome: 7200,
+      savingsRate: 0.1,
+      confidence: 60,
+      essentialShare: 0.56,
+      discretionaryShare: 0.3,
+      demandBias: { food: 1, daily_necessities: 1, entertainment: 1.05, luxury: 0.55 },
+    },
+    {
+      id: 'high_income',
+      label: '高收入家庭',
+      populationShare: 0.15,
+      averageIncome: 24000,
+      disposableIncome: 17000,
+      savingsRate: 0.22,
+      confidence: 68,
+      essentialShare: 0.38,
+      discretionaryShare: 0.44,
+      demandBias: { food: 0.88, daily_necessities: 0.92, entertainment: 1.18, luxury: 1.45 },
+    },
+  ];
+}
+
+function createInitialNpcFirms(): NpcFirm[] {
+  return [
+    { id: 'npc_food', industry: 'food', employees: 36, capacity: 1100, wageOffer: 5600, financialHealth: 65, plannedSupply: 980, pricingPower: 0.12 },
+    { id: 'npc_daily', industry: 'daily_necessities', employees: 34, capacity: 980, wageOffer: 5400, financialHealth: 62, plannedSupply: 960, pricingPower: 0.1 },
+    { id: 'npc_entertainment', industry: 'entertainment', employees: 22, capacity: 520, wageOffer: 6800, financialHealth: 58, plannedSupply: 540, pricingPower: 0.18 },
+    { id: 'npc_luxury', industry: 'luxury', employees: 12, capacity: 220, wageOffer: 8800, financialHealth: 61, plannedSupply: 240, pricingPower: 0.26 },
+  ];
+}
+
 export function createInitialGameState(players: InitialRoomPlayer[], gameMode: GameMode = 'professional'): GameState {
   const gamePlayers = players.map((player, index) =>
     createInitialPlayer(
@@ -207,6 +286,54 @@ export function createInitialGameState(players: InitialRoomPlayer[], gameMode: G
       employmentRate: 70,
       giniCoefficient: 0.4,
       socialStability: 75,
+      households: createInitialHouseholds(),
+      npcFirms: createInitialNpcFirms(),
+      creditConditions: {
+        householdCreditTightness: 0.42,
+        businessCreditTightness: 0.38,
+        defaultRate: 0.03,
+        lendingSentiment: 0.58,
+        mortgageApprovalRate: 0.68,
+      },
+      macroState: {
+        consumerConfidence: 60,
+        businessConfidence: 58,
+        externalDemandIndex: 100,
+        fiscalPressure: 0.28,
+        unemploymentPressure: 0.3,
+        inflationExpectation: 0.03,
+        socialMobilityIndex: 55,
+      },
+      priceAnchors: {
+        food: { referencePrice: INITIAL_GOODS.food.basePrice, lastClearingPrice: INITIAL_GOODS.food.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+        daily_necessities: { referencePrice: INITIAL_GOODS.daily_necessities.basePrice, lastClearingPrice: INITIAL_GOODS.daily_necessities.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+        housing: { referencePrice: INITIAL_GOODS.housing.basePrice, lastClearingPrice: INITIAL_GOODS.housing.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+        transportation: { referencePrice: INITIAL_GOODS.transportation.basePrice, lastClearingPrice: INITIAL_GOODS.transportation.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+        entertainment: { referencePrice: INITIAL_GOODS.entertainment.basePrice, lastClearingPrice: INITIAL_GOODS.entertainment.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+        luxury: { referencePrice: INITIAL_GOODS.luxury.basePrice, lastClearingPrice: INITIAL_GOODS.luxury.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+        education: { referencePrice: INITIAL_GOODS.education.basePrice, lastClearingPrice: INITIAL_GOODS.education.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+        healthcare: { referencePrice: INITIAL_GOODS.healthcare.basePrice, lastClearingPrice: INITIAL_GOODS.healthcare.currentPrice, inventoryPressure: 0, shortageIndex: 0 },
+      },
+      inventoryPressure: {
+        food: 0,
+        daily_necessities: 0,
+        housing: 0,
+        transportation: 0,
+        entertainment: 0,
+        luxury: 0,
+        education: 0,
+        healthcare: 0,
+      },
+      shortageIndex: {
+        food: 0,
+        daily_necessities: 0,
+        housing: 0,
+        transportation: 0,
+        entertainment: 0,
+        luxury: 0,
+        education: 0,
+        healthcare: 0,
+      },
       supplyDemand: createInitialSupplyDemand(),
       economicCycle: 'growth',
       cyclePhase: 0,

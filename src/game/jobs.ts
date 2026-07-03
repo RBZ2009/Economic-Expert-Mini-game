@@ -1,4 +1,4 @@
-import { ECONOMY_BALANCE, Player } from '@/types/game';
+import { ECONOMY_BALANCE, IndustryType, Player } from '@/types/game';
 
 export type JobPaymentType = 'monthly' | 'hourly';
 
@@ -18,6 +18,12 @@ export interface JobOffer {
   happinessCost: number;
   fatigueCost: number;
   overtimeAllowed: boolean;
+  contractType: 'hourly' | 'monthly';
+  hoursPerRound: number;
+  benefits: number;
+  promotionTrack: string;
+  jobSecurity: number;
+  industry: IndustryType;
 }
 
 export function getWorkerEducationLevel(worker: Player): number {
@@ -58,10 +64,16 @@ export function getJobOffers(players: Player[], worker: Player, marketEmployment
       requiredEducation: 0,
       requiredExperience: 0,
       maxWorkPerRound: 3,
-      healthCost: 5,
+      healthCost: 0,
       happinessCost: 2,
       fatigueCost: 18,
       overtimeAllowed: false,
+      contractType: 'hourly',
+      hoursPerRound: 8,
+      benefits: 0.08,
+      promotionTrack: '服务业基础岗->门店主管',
+      jobSecurity: 48,
+      industry: 'public_service',
     },
     {
       id: 'npc_factory_monthly',
@@ -75,10 +87,16 @@ export function getJobOffers(players: Player[], worker: Player, marketEmployment
       requiredEducation: 1,
       requiredExperience: 1,
       maxWorkPerRound: 0,
-      healthCost: 7,
+      healthCost: 0,
       happinessCost: 3,
       fatigueCost: 22,
       overtimeAllowed: true,
+      contractType: 'monthly',
+      hoursPerRound: 10,
+      benefits: 0.18,
+      promotionTrack: '产线工人->班组长->车间主管',
+      jobSecurity: 68,
+      industry: 'daily_necessities',
     },
     {
       id: 'npc_tech_monthly',
@@ -92,10 +110,16 @@ export function getJobOffers(players: Player[], worker: Player, marketEmployment
       requiredEducation: 2,
       requiredExperience: 3,
       maxWorkPerRound: 0,
-      healthCost: 6,
+      healthCost: 0,
       happinessCost: 2,
       fatigueCost: 20,
       overtimeAllowed: true,
+      contractType: 'monthly',
+      hoursPerRound: 9,
+      benefits: 0.22,
+      promotionTrack: '运营专员->项目经理->业务负责人',
+      jobSecurity: 72,
+      industry: 'finance',
     },
   ];
 
@@ -116,10 +140,16 @@ export function getJobOffers(players: Player[], worker: Player, marketEmployment
         requiredEducation: company.productQuality >= 70 ? 2 : 1,
         requiredExperience: Math.max(1, Math.min(5, company.machines)),
         maxWorkPerRound: 0,
-        healthCost: 7,
+        healthCost: 0,
         happinessCost: company.morale >= 70 ? 1 : 4,
         fatigueCost: company.morale >= 70 ? 18 : 26,
         overtimeAllowed: true,
+        contractType: 'monthly',
+        hoursPerRound: company.machines >= 2 ? 10 : 9,
+        benefits: 0.16 + Math.min(0.1, company.reputation / 1000),
+        promotionTrack: `${company.name} 初级岗->骨干->管理岗`,
+        jobSecurity: Math.round(Math.max(42, Math.min(88, company.reputation * 0.8 + company.morale * 0.3))),
+        industry: company.industry ?? company.productionType,
       };
     });
 

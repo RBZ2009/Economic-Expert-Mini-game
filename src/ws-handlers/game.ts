@@ -9,17 +9,31 @@ import { applyMultiplayerGameAction, MultiplayerActionHandlers } from '@/game/en
 import { createInitialGameState, createInitialPlayer } from '@/game/initial-state';
 import { applyNewsEvent, pickNewsEvent } from '@/game/news';
 import { getJobOffers, getWorkerCurrentJob, isQualifiedForJob } from '@/game/jobs';
-import { estimateProductSales } from '@/components/game/company-helpers';
+import { estimateProductSales, findBestSaleOption } from '@/components/game/company-helpers';
 import {
   getCompanyCapacityUnits,
+  getCompanyDepreciation,
+  getCompanyFixedCosts,
   getEffectiveCapacityUnits,
+  getCompanyInventoryHoldingCost,
   getMaterialPurchaseCost,
   getMaterialUnitPrice,
   getMaxProductionByCapacity,
   getProcessingCost,
   getProductionCapacityUsage,
+  updateCompanyFinanceSnapshot,
 } from '@/game/company-economics';
-import { applyDemandMultiplier, getBaselineMarketDemand, scaleHouseholdDemand } from '@/game/market';
+import {
+  applyDemandMultiplier,
+  applyPolicyTransmission,
+  calculateHouseholdDemandBySegment,
+  deriveMacroState,
+  getBaselineMarketDemand,
+  getNpcSupplyContribution,
+  updateHouseholdsForMacro,
+  updateMarketAnchors,
+  updateNpcFirmsForMacro,
+} from '@/game/market';
 import {
   GameState,
   Player,
@@ -54,6 +68,22 @@ const generateBatchId = () => 'batch_' + Math.random().toString(36).substring(2,
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+const WORK_HEALTH_THRESHOLD = 25;
+const FORCED_REST_TRIGGER = 10;
+const FORCED_REST_RECOVERY_HEALTH = 30;
+const FORCED_REST_DURATION = 2;
+
+function getForcedRestTrigger(player: Player): number {
+  return player.health < FORCED_REST_TRIGGER && (player.workState.forcedRestRounds ?? 0) <= 0
+    ? FORCED_REST_DURATION
+    : player.workState.forcedRestRounds ?? 0;
+}
+
+function getActionBlockReasonForPlayer(player: Player): string | null {
+  const forcedRestRounds = getForcedRestTrigger(player);
+  return forcedRestRounds > 0 ? `健康值过低，需强制休息 ${forcedRestRounds} 轮` : null;
 }
 
 function applyPendingPoliciesForRound(gameState: GameState, market: GameState['market'], round: number): { market: GameState['market']; appliedNews: RandomEvent | null; remainingPolicies: GameState['pendingPolicies'] } {
@@ -190,27 +220,6 @@ function applyLingeringEventPressure(market: GameState['market'], events: Random
   });
 }
 
-function calculateHouseholdDemand(players: Player[]): Record<GoodType, number> {
-  const population = Math.max(1, players.length);
-  const avgCash = players.reduce((sum, player) => sum + Math.max(0, player.cash), 0) / population;
-  const avgHappiness = players.reduce((sum, player) => sum + player.happiness, 0) / population;
-  const lowHealthCount = players.filter(player => player.health < 55).length;
-  const foodShortage = players.reduce((sum, player) => sum + Math.max(0, 2 - player.goods.food), 0);
-  const dailyShortage = players.reduce((sum, player) => sum + Math.max(0, 1 - player.goods.daily_necessities), 0);
-  const purchasingPower = clamp(avgCash / 20000, 0.4, 3);
-
-  return {
-    food: population * 2 + foodShortage * 2,
-    daily_necessities: population * 1.2 + dailyShortage * 2,
-    housing: population * 0.25,
-    transportation: population * 0.25 * purchasingPower,
-    entertainment: population * (0.3 + avgHappiness / 160) * purchasingPower,
-    luxury: population * 0.08 * Math.max(0, purchasingPower - 0.6),
-    education: population * 0.18 * purchasingPower,
-    healthcare: Math.max(1, lowHealthCount * 1.5),
-  };
-}
-
 function recalculateMarketShare(players: Player[], monthlySales: Record<string, { type: GoodType; sold: number }>): Player[] {
   const totalByType = Object.values(monthlySales).reduce((acc, sale) => {
     acc[sale.type] = (acc[sale.type] ?? 0) + sale.sold;
@@ -221,12 +230,24 @@ function recalculateMarketShare(players: Player[], monthlySales: Record<string, 
     if (!player.company) return player;
     const sale = monthlySales[player.id];
     const totalSold = sale ? totalByType[sale.type] ?? 0 : 0;
-    const currentShare = totalSold > 0 ? (sale.sold / totalSold) * 100 : player.company.marketShare * 0.92;
+    const salesShare = totalSold > 0 ? (sale.sold / totalSold) * 100 : player.company.marketShare * 0.92;
+    const competitionScore = clamp(
+      14
+      + player.company.productQuality * 0.35
+      + player.company.reputation * 0.24
+      + player.company.machines * 0.9
+      + player.company.employees * 0.15
+      - player.company.inventory * 0.08
+      + Math.max(0, player.company.cashFlow.final / 10000),
+      5,
+      90,
+    );
+    const currentShare = salesShare * 0.68 + competitionScore * 0.32;
     return {
       ...player,
       company: {
         ...player.company,
-        marketShare: clamp(currentShare, 0, 100),
+        marketShare: clamp(currentShare * 0.85 + player.company.marketShare * 0.15, 0, 100),
       },
     };
   });
@@ -562,6 +583,10 @@ function broadcastToRoom(room: GameRoom, message: object, excludePlayerId?: stri
 
 function isPlayerActionBlocked(room: GameRoom, playerId: string): string | null {
   if (!room.gameState) return '游戏未开始';
+  const player = getPlayerFromGame(room.gameState, playerId);
+  if (!player) return '玩家不存在';
+  const healthBlock = getActionBlockReasonForPlayer(player);
+  if (healthBlock) return healthBlock;
   if (room.gameState.roundCompletedPlayers.includes(playerId)) {
     return '你已经完成了本轮操作，等待其他玩家';
   }
@@ -575,6 +600,9 @@ function handleWork(room: GameRoom, playerId: string): { success: boolean; error
   if (!player) return { success: false, error: '玩家不存在' };
   if (player.profession === 'worker' && (player.workerAbilities?.unemployedRounds ?? 0) > 0) {
     return { success: false, error: '当前处于失业期，不能进行正式工作' };
+  }
+  if (player.health < WORK_HEALTH_THRESHOLD) {
+    return { success: false, error: '健康值过低，无法工作，请先休息或治疗' };
   }
 
   // 检查是否已完成本轮操作
@@ -597,7 +625,7 @@ function handleWork(room: GameRoom, playerId: string): { success: boolean; error
   let income = player.profession === 'worker' && currentJob
     ? currentJob.wage * (1 - fatiguePenalty) * (1 + skillBonus)
     : professionConfig.baseIncome * (1 - fatiguePenalty) * (1 + skillBonus);
-  let healthCost = 5;
+  let healthCost = 0;
   let happinessDelta = 2 - player.workState.workCount;
   let fatigueIncrease = 20;
 
@@ -609,13 +637,13 @@ function handleWork(room: GameRoom, playerId: string): { success: boolean; error
 
   if (player.profession === 'entrepreneur') {
     income = player.company?.profit || 0;
-    healthCost = 3;
+    healthCost = 0;
     fatigueIncrease = 15;
   }
 
   if (player.profession === 'government') {
     income = professionConfig.baseIncome;
-    healthCost = 2;
+    healthCost = 0;
     fatigueIncrease = 10;
   }
 
@@ -637,6 +665,7 @@ function handleWork(room: GameRoom, playerId: string): { success: boolean; error
         experience: (ability.experience ?? 0) + (p.profession === 'worker' ? 1 : 0),
       } : ability,
       workState: {
+        ...p.workState,
         workCount: p.workState.workCount + 1,
         fatigueLevel: Math.min(100, p.workState.fatigueLevel + fatigueIncrease),
         lastWorkTime: Date.now(),
@@ -653,7 +682,7 @@ function handleOvertimeWork(room: GameRoom, playerId: string): { success: boolea
   if (!player) return { success: false, error: '玩家不存在' };
   if (player.profession !== 'worker') return { success: false, error: '只有员工可以加班' };
   if ((player.workerAbilities?.unemployedRounds ?? 0) > 0) return { success: false, error: '失业期间不能加班' };
-  if (player.health < 35) return { success: false, error: '健康值过低，不能继续加班' };
+  if (player.health < WORK_HEALTH_THRESHOLD) return { success: false, error: '健康值过低，不能继续加班' };
   if (player.workState.fatigueLevel >= 85) return { success: false, error: '疲劳度过高，不能继续加班' };
   if ((player.workState.overtimeCount ?? 0) >= 1) return { success: false, error: '每轮最多加班 1 次' };
   const blockReason = isPlayerActionBlocked(room, playerId);
@@ -674,7 +703,7 @@ function handleOvertimeWork(room: GameRoom, playerId: string): { success: boolea
     return {
       ...p,
       cash: p.cash + income - taxPaid,
-      health: Math.max(0, p.health - currentJob.healthCost - 8),
+      health: Math.max(0, p.health - Math.max(4, currentJob.healthCost + 4)),
       happiness: Math.max(0, p.happiness - currentJob.happinessCost - 3),
       workerAbilities: ability ? {
         ...ability,
@@ -747,21 +776,38 @@ function handleNegotiateWage(room: GameRoom, playerId: string): { success: boole
   if (ability.lastNegotiationRound === room.gameState.currentRound) {
     return { success: false, error: '每轮只能谈薪 1 次' };
   }
-  const employmentPenalty = (100 - room.gameState.market.employmentRate) * 0.4;
-  const successChance = clamp((ability.skill + ability.negotiationPower - employmentPenalty) / 120, 0.15, 0.85);
-  const succeeded = Math.random() < successChance;
+  const currentJob = getWorkerCurrentJob(player, room.gameState.players);
+  const marketMinimum = room.gameState.market.laborMarket?.minimumWage ?? Math.round(ECONOMY_BALANCE.worker.baseWage * 0.6);
+  const outsideOptions = getJobOffers(room.gameState.players, player, room.gameState.market.employmentRate)
+    .filter(offer => offer.id !== currentJob.id && isQualifiedForJob(player, offer) && offer.wage >= currentJob.wage * 0.95)
+    .length;
+  const employmentPenalty = (100 - room.gameState.market.employmentRate) * 0.35;
+  const askRatio = clamp((ability.wageLevel - currentJob.wage) / Math.max(currentJob.wage, 1), -0.1, 0.25);
+  const relationshipPenalty = ability.lastNegotiationOutcome === 'rejected' ? 10 : 0;
+  const successChance = clamp(
+    (ability.skill * 0.35 + ability.negotiationPower * 0.45 + outsideOptions * 6 + room.gameState.market.employmentRate * 0.18 - employmentPenalty - askRatio * 80 - relationshipPenalty) / 100,
+    0.12,
+    0.88,
+  );
+  const roll = Math.random();
+  const outcome: 'rejected' | 'small_raise' | 'normal_raise' | 'strong_raise' =
+    roll > successChance ? 'rejected' : roll > successChance * 0.72 ? 'small_raise' : roll > successChance * 0.35 ? 'normal_raise' : 'strong_raise';
+  const raiseMultiplier = outcome === 'strong_raise' ? 1.1 : outcome === 'normal_raise' ? 1.06 : outcome === 'small_raise' ? 1.03 : 1;
+  const newWage = Math.max(marketMinimum, Math.round(ability.wageLevel * raiseMultiplier));
 
   room.gameState.players = room.gameState.players.map(p => {
     if (p.id !== playerId) return p;
     const current = p.workerAbilities ?? ability;
     return {
       ...p,
-      happiness: clamp(p.happiness + (succeeded ? 4 : -3), 0, 100),
+      happiness: clamp(p.happiness + (outcome === 'rejected' ? -3 : outcome === 'small_raise' ? 2 : 4), 0, 100),
       workerAbilities: {
         ...current,
-        wageLevel: succeeded ? Math.round(current.wageLevel * 1.08) : current.wageLevel,
-        negotiationPower: Math.min(100, current.negotiationPower + 3),
+        wageLevel: newWage,
+        negotiationPower: Math.min(100, current.negotiationPower + (outcome === 'rejected' ? 2 : 3)),
         lastNegotiationRound: room.gameState!.currentRound,
+        lastNegotiationAsk: currentJob.wage,
+        lastNegotiationOutcome: outcome,
       },
     };
   });
@@ -771,7 +817,11 @@ function handleNegotiateWage(room: GameRoom, playerId: string): { success: boole
     round: room.gameState.currentRound,
     timestamp: Date.now(),
     type: 'action',
-    message: succeeded ? `${player.name} 谈薪成功，工资上调 8%` : `${player.name} 谈薪失败，积累了谈判经验`,
+    message:
+      outcome === 'strong_raise' ? `${player.name} 谈薪表现出色，工资上调 10%`
+        : outcome === 'normal_raise' ? `${player.name} 谈薪成功，工资上调 6%`
+          : outcome === 'small_raise' ? `${player.name} 谈到小幅加薪，工资上调 3%`
+            : `${player.name} 谈薪被拒，但积累了谈判经验`,
     playerId,
   });
 
@@ -839,6 +889,7 @@ function handleSideJob(room: GameRoom, playerId: string): { success: boolean; er
   if (player.profession !== 'worker') return { success: false, error: '只有员工可以做副业' };
   const blockReason = isPlayerActionBlocked(room, playerId);
   if (blockReason) return { success: false, error: blockReason };
+  if (player.health < WORK_HEALTH_THRESHOLD) return { success: false, error: '健康值过低，无法做副业' };
 
   const income = ECONOMY_BALANCE.worker.sideJobIncome;
   const taxPaid = income * room.gameState.market.globalTaxRate;
@@ -856,7 +907,6 @@ function handleSideJob(room: GameRoom, playerId: string): { success: boolean; er
     return {
       ...p,
       cash: p.cash + income - taxPaid,
-      health: Math.max(0, p.health - 8),
       happiness: Math.max(0, p.happiness - ECONOMY_BALANCE.worker.sideJobHappinessCost),
       workerAbilities: {
         ...ability,
@@ -892,6 +942,19 @@ function handleBuyGood(room: GameRoom, playerId: string, goodType: GoodType, qua
 
   room.gameState.players = room.gameState.players.map(p => {
     if (p.id !== playerId) return p;
+    if (goodType === 'healthcare') {
+      return {
+        ...p,
+        cash: p.cash - totalCost,
+        goods: { ...p.goods, [goodType]: p.goods[goodType] + quantity },
+        health: Math.min(100, p.health + 18 * quantity),
+        happiness: clamp(p.happiness + 2 * quantity, 0, 100),
+        workState: {
+          ...p.workState,
+          fatigueLevel: Math.max(0, p.workState.fatigueLevel - 6 * quantity),
+        },
+      };
+    }
     return {
       ...p,
       cash: p.cash - totalCost,
@@ -971,7 +1034,11 @@ function handleSellCompanyProduct(room: GameRoom, playerId: string, quantity: nu
   if (lockedPrice !== undefined) {
     return { success: false, error: `${prodConfig.name} 本轮已经提交过销售，下轮才能再次销售` };
   }
-  const effectivePrice = lockedPrice ?? pricePerUnit;
+  const requestedQuantity = Math.min(quantity, inventory);
+  const autoBest = requestedQuantity >= inventory
+    ? findBestSaleOption(room.gameState.market, company, saleProductType, requestedQuantity)
+    : null;
+  const effectivePrice = lockedPrice ?? autoBest?.price ?? pricePerUnit;
   
   if (effectivePrice < minPrice || effectivePrice > maxPrice) {
     return { success: false, error: `售价应在 ¥${minPrice}~¥${maxPrice} 之间` };
@@ -981,7 +1048,7 @@ function handleSellCompanyProduct(room: GameRoom, playerId: string, quantity: nu
   }
 
   const market = room.gameState.market;
-  const actualSold = estimateProductSales(market, company, saleProductType, quantity, effectivePrice);
+  const actualSold = estimateProductSales(market, company, saleProductType, requestedQuantity, effectivePrice);
   if (actualSold <= 0) {
     return { success: false, error: '售价过高或需求不足，本轮没有成交' };
   }
@@ -1013,7 +1080,7 @@ function handleSellCompanyProduct(room: GameRoom, playerId: string, quantity: nu
           [saleProductType]: {
             round: room.gameState!.currentRound,
             price: effectivePrice,
-            requested: quantity,
+            requested: requestedQuantity,
             sold: actualSold,
             grossRevenue,
             netRevenue,
@@ -1036,11 +1103,11 @@ function handleSellCompanyProduct(room: GameRoom, playerId: string, quantity: nu
       },
     };
   });
-  room.gameState.market.supplyDemand[saleProductType].supply += quantity - actualSold;
+  room.gameState.market.supplyDemand[saleProductType].supply += requestedQuantity - actualSold;
   room.gameState.market.supplyDemand[saleProductType].demand = Math.max(0, room.gameState.market.supplyDemand[saleProductType].demand - actualSold);
 
   roomManager.updateGameState(room.id, room.gameState);
-  console.log(`[SellProduct] player=${playerId}, product=${saleProductType}, requested=${quantity}, sold=${actualSold}, price=${effectivePrice}, netRevenue=${netRevenue}, newCash=${player.cash + netRevenue}`);
+  console.log(`[SellProduct] player=${playerId}, product=${saleProductType}, requested=${requestedQuantity}, sold=${actualSold}, price=${effectivePrice}, netRevenue=${netRevenue}, newCash=${player.cash + netRevenue}`);
   return { success: true };
 }
 
@@ -2196,7 +2263,11 @@ function settleRound(gameState: GameState): GameState {
     }
 
     const fatiguePenalty = Math.max(0, player.workState.fatigueLevel - 60);
-    health += 5 - Math.floor(fatiguePenalty / 10);
+    const fatigueHealthPenalty = player.workState.fatigueLevel >= 80
+      ? Math.ceil((player.workState.fatigueLevel - 75) / 8)
+      : 0;
+    const forcedRestBeforeSettlement = getForcedRestTrigger(player);
+    health += 7 - Math.floor(fatiguePenalty / 8) - fatigueHealthPenalty;
     happiness -= Math.floor(fatiguePenalty / 12);
     if (health < 30) happiness -= 10;
 
@@ -2238,10 +2309,13 @@ function settleRound(gameState: GameState): GameState {
     }
 
     if (company) {
+      company.industry = company.productionType;
       const wagePerEmployee = company.productionCost > 0 ? company.productionCost : ECONOMY_BALANCE.company.wagePerEmployee;
       const monthlyWages = company.employees * wagePerEmployee;
       let monthlyProductionCosts = 0;
       let monthlyRevenue = 0;
+      let monthlyOtherCosts = 0;
+      let monthlyTaxCosts = 0;
 
       cash -= monthlyWages;
       taxRevenue += Math.max(0, monthlyWages * market.globalTaxRate * 0.3);
@@ -2282,23 +2356,43 @@ function settleRound(gameState: GameState): GameState {
         }
       }
 
-      const monthlyProfit = monthlyRevenue - monthlyProductionCosts - monthlyWages;
+      const fixedCosts = getCompanyFixedCosts(company);
+      const depreciation = getCompanyDepreciation(company);
+      const inventoryHoldingCost = getCompanyInventoryHoldingCost(company);
+      const financingCosts = Math.round((player.loans ?? []).filter(loan => loan.type === 'business').reduce((sum, loan) => sum + loan.remaining, 0) * 0.01);
+      monthlyOtherCosts = fixedCosts + depreciation + inventoryHoldingCost + financingCosts;
+      monthlyTaxCosts = Math.max(0, Math.round(monthlyRevenue * market.globalTaxRate * 0.08));
+      const monthlyProfit = monthlyRevenue - monthlyProductionCosts - monthlyWages - monthlyOtherCosts - monthlyTaxCosts;
       company.cashFlow = {
         initial: company.cashFlow.final,
         income: monthlyRevenue,
-        expenses: monthlyProductionCosts + monthlyWages,
+        expenses: monthlyProductionCosts + monthlyWages + monthlyOtherCosts + monthlyTaxCosts,
         wages: monthlyWages,
         productionCosts: monthlyProductionCosts,
-        otherCosts: 0,
+        otherCosts: monthlyOtherCosts + monthlyTaxCosts,
         final: company.cashFlow.final + monthlyProfit,
       };
       company.revenue += monthlyRevenue;
-      company.costs += monthlyProductionCosts + monthlyWages;
+      company.costs += monthlyProductionCosts + monthlyWages + monthlyOtherCosts + monthlyTaxCosts;
       company.profit += monthlyProfit;
       company.stats.monthlyProfit = monthlyProfit;
+      company.fixedCosts = fixedCosts;
+      company.depreciation = depreciation;
+      company.financingCosts = financingCosts;
+      company.inventoryHoldingCost = inventoryHoldingCost;
+      company.incomeStatement = {
+        revenue: monthlyRevenue,
+        cogs: monthlyWages + monthlyProductionCosts,
+        grossProfit: monthlyRevenue - monthlyWages - monthlyProductionCosts,
+        operatingProfit: monthlyRevenue - monthlyWages - monthlyProductionCosts - fixedCosts - inventoryHoldingCost,
+        netProfit: monthlyProfit,
+        taxes: monthlyTaxCosts,
+        interestExpense: financingCosts,
+      };
       company.morale = monthlyWages > 0 && cash < 0 ? Math.max(0, company.morale - 10) : Math.min(100, company.morale + 5);
       company.reputation = Math.max(0, company.reputation - 1);
       company.productionUsedThisRound = 0;
+      Object.assign(company, updateCompanyFinanceSnapshot(company, (player.loans ?? []).filter(loan => loan.type === 'business').reduce((sum, loan) => sum + loan.remaining, 0)));
     }
 
   if (loans.length > 0) {
@@ -2329,6 +2423,15 @@ function settleRound(gameState: GameState): GameState {
       ? Object.fromEntries(Object.entries(player.policyCooldowns).map(([k, v]) => [k, Math.max(0, v - 1)])) as Player['policyCooldowns']
       : undefined;
 
+    let forcedRestAfterSettlement = forcedRestBeforeSettlement;
+    if (forcedRestAfterSettlement > 0) {
+      forcedRestAfterSettlement -= 1;
+      health = Math.max(health, forcedRestAfterSettlement === 0 ? FORCED_REST_RECOVERY_HEALTH : 12);
+      happiness = Math.min(100, happiness + 4);
+    } else if (health < FORCED_REST_TRIGGER) {
+      forcedRestAfterSettlement = FORCED_REST_DURATION;
+    }
+
     return {
       ...player,
       cash: Math.round(cash * 100) / 100,
@@ -2351,6 +2454,7 @@ function settleRound(gameState: GameState): GameState {
         monthlySalaryPaidRound: player.profession === 'worker' && workerAbilities?.paymentType === 'monthly'
           ? gameState.currentRound
           : player.workState.monthlySalaryPaidRound,
+        forcedRestRounds: forcedRestAfterSettlement,
       },
       rentPaid: false,
       hasActedThisRound: false,
@@ -2361,42 +2465,55 @@ function settleRound(gameState: GameState): GameState {
   });
 
   const playersWithMarketShare = recalculateMarketShare(players, monthlyCompanySales);
-  const householdDemand = scaleHouseholdDemand(calculateHouseholdDemand(playersWithMarketShare));
+  market.macroState = deriveMacroState(playersWithMarketShare, market);
+  market.households = updateHouseholdsForMacro(playersWithMarketShare, market);
+  market.npcFirms = updateNpcFirmsForMacro(market);
+  const householdDemand = calculateHouseholdDemandBySegment(market.households, market);
+  const npcSupply = getNpcSupplyContribution(market.npcFirms);
   Object.keys(market.goods).forEach(key => {
     const goodType = key as GoodType;
-    const good = market.goods[goodType];
     const sd = market.supplyDemand[goodType];
-    sd.demand += householdDemand[goodType] ?? 0;
-    const demandSupplyRatio = sd.demand / Math.max(1, sd.supply);
-    const marketPressure = clamp((demandSupplyRatio - 1) * 0.14, -0.16, 0.22);
-    const inflation = market.inflationRate * 0.1;
-    const volatility = (Math.random() - 0.5) * 0.05;
-    const newPrice = good.currentPrice * (1 + marketPressure + inflation + volatility);
-    good.currentPrice = Math.max(good.basePrice * 0.3, Math.min(good.basePrice * 3, newPrice));
-    good.priceHistory.push(good.currentPrice);
-    if (good.priceHistory.length > 10) good.priceHistory.shift();
     const baselineDemand = Math.max(getBaselineMarketDemand(goodType), householdDemand[goodType] ?? 20);
-    sd.demand = Math.max(baselineDemand, sd.demand * 0.72 + baselineDemand * 0.28);
-    sd.supply = Math.max(5, sd.supply * 0.82);
+    sd.demand = Math.max(1, Math.round(sd.demand * 0.46 + baselineDemand * 0.54));
+    sd.supply = Math.max(5, Math.round(sd.supply * 0.58 + (npcSupply[goodType] ?? 0) * 0.42));
+  });
+  const policyTransmission = applyPolicyTransmission(market, playersWithMarketShare);
+  const adjustedMarket = updateMarketAnchors(policyTransmission.market);
+  market.goods = adjustedMarket.goods;
+  market.priceAnchors = adjustedMarket.priceAnchors;
+  market.inventoryPressure = adjustedMarket.inventoryPressure;
+  market.shortageIndex = adjustedMarket.shortageIndex;
+  market.supplyDemand = adjustedMarket.supplyDemand;
+  const playersAfterPolicy = playersWithMarketShare.map(player => {
+    const delta = policyTransmission.playerCashDelta[player.id] ?? 0;
+    return delta === 0 ? player : { ...player, cash: Math.round((player.cash + delta) * 100) / 100 };
   });
 
   const stockChange = 1 + (Math.random() - 0.5) * market.stockMarket.volatility * 2;
   market.stockMarket.index = Math.max(10, market.stockMarket.index * stockChange);
   market.stockMarket.volatility = Math.max(0.05, market.stockMarket.volatility * 0.95);
-  const government = playersWithMarketShare.find(player => player.profession === 'government' && player.govAbilities);
+  const government = playersAfterPolicy.find(player => player.profession === 'government' && player.govAbilities);
   const playersWithTax = taxRevenue > 0 && government?.govAbilities
-    ? playersWithMarketShare.map(player => player.id === government.id && player.govAbilities
+    ? playersAfterPolicy.map(player => player.id === government.id && player.govAbilities
       ? { ...player, govAbilities: { ...player.govAbilities, treasuryBalance: player.govAbilities.treasuryBalance + taxRevenue } }
       : player)
-    : playersWithMarketShare;
+    : playersAfterPolicy;
 
   market.monthlyTaxRevenue = Math.round(taxRevenue * 100) / 100;
-  market.gdp = playersWithTax.reduce((sum, player) => sum + Math.max(0, player.cash), 0);
+  market.gdp = playersWithTax.reduce((sum, player) => sum + Math.max(0, player.cash), 0)
+    + market.npcFirms.reduce((sum, firm) => sum + firm.plannedSupply * 4, 0);
   market.inflationRate = Math.max(-0.1, Math.min(0.3, market.inflationRate + (Math.random() - 0.5) * 0.02));
   market.policyStabilityModifier = (market.policyStabilityModifier ?? 0) * 0.75;
   market.productivityBonus = (market.productivityBonus ?? 0) * 0.95;
   applyLingeringEventPressure(market, gameState.activeEvents);
-  market.socialStability = clamp(calculateSocialStability(playersWithTax) + (market.policyStabilityModifier ?? 0), 0, 100);
+  market.socialStability = clamp(
+    calculateSocialStability(playersWithTax)
+    + (market.policyStabilityModifier ?? 0)
+    + market.macroState.consumerConfidence * 0.03
+    - market.creditConditions.defaultRate * 40,
+    0,
+    100,
+  );
 
   const incomes = playersWithTax.map(p => Math.max(0, p.cash)).sort((a, b) => a - b);
   const sumIncomes = incomes.reduce((sum, income) => sum + income, 0);
