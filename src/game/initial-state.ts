@@ -9,6 +9,7 @@ import {
   INITIAL_GOODS,
   PLAYER_COLORS,
 } from '@/types/game';
+import { createInitialSupplyDemand } from '@/game/market';
 
 export interface InitialRoomPlayer {
   id: string;
@@ -206,16 +207,7 @@ export function createInitialGameState(players: InitialRoomPlayer[], gameMode: G
       employmentRate: 70,
       giniCoefficient: 0.4,
       socialStability: 75,
-      supplyDemand: {
-        food: { supply: 100, demand: 100 },
-        daily_necessities: { supply: 100, demand: 100 },
-        housing: { supply: 50, demand: 50 },
-        transportation: { supply: 100, demand: 100 },
-        entertainment: { supply: 50, demand: 50 },
-        luxury: { supply: 20, demand: 20 },
-        education: { supply: 30, demand: 30 },
-        healthcare: { supply: 50, demand: 50 },
-      },
+      supplyDemand: createInitialSupplyDemand(),
       economicCycle: 'growth',
       cyclePhase: 0,
       globalTaxRate: 0.2,

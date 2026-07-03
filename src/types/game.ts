@@ -955,6 +955,7 @@ export interface RandomEvent {
     employment?: number;
     socialStability?: number;
     specificGoodPrice?: { goodType: GoodType; multiplier: number };
+    demandMultiplier?: Partial<Record<GoodType, number>>;
     allIncomes?: number;
     stockMarket?: { indexChange: number; volatilityChange: number };
     cycleShift?: EconomicCycle;
@@ -988,7 +989,13 @@ export const RANDOM_EVENTS: RandomEvent[] = [
       employment: -15,
       socialStability: -10,
       stockMarket: { indexChange: -0.2, volatilityChange: 0.3 },
-      cycleShift: 'downturn'
+      cycleShift: 'downturn',
+      demandMultiplier: {
+        food: 0.78,
+        daily_necessities: 0.82,
+        entertainment: 0.45,
+        luxury: 0.35,
+      },
     },
     probability: 0.1,
     duration: 3,
@@ -1006,7 +1013,12 @@ export const RANDOM_EVENTS: RandomEvent[] = [
       inflation: -0.02,
       employment: 5,
       stockMarket: { indexChange: 0.1, volatilityChange: 0.1 },
-      cycleShift: 'growth'
+      cycleShift: 'growth',
+      demandMultiplier: {
+        daily_necessities: 1.08,
+        entertainment: 1.12,
+        luxury: 1.08,
+      },
     },
     probability: 0.15,
     warning: '生产率将改善，企业扩产和技术投入的边际回报更高。'
@@ -1023,7 +1035,8 @@ export const RANDOM_EVENTS: RandomEvent[] = [
       inflation: 0.08,
       socialStability: -8,
       employment: -5,
-      specificGoodPrice: { goodType: 'food', multiplier: 1.5 }
+      specificGoodPrice: { goodType: 'food', multiplier: 1.5 },
+      demandMultiplier: { food: 1.25, daily_necessities: 0.9 },
     },
     probability: 0.08,
     duration: 2,
@@ -1042,7 +1055,13 @@ export const RANDOM_EVENTS: RandomEvent[] = [
       employment: 10,
       socialStability: 5,
       stockMarket: { indexChange: 0.15, volatilityChange: 0.2 },
-      cycleShift: 'overheating'
+      cycleShift: 'overheating',
+      demandMultiplier: {
+        food: 1.1,
+        daily_necessities: 1.15,
+        entertainment: 1.45,
+        luxury: 1.35,
+      },
     },
     probability: 0.12,
     warning: '需求强劲但通胀压力上升，企业可提价，投资者需警惕过热。'
@@ -1057,7 +1076,11 @@ export const RANDOM_EVENTS: RandomEvent[] = [
     explanation: '通胀上升会压缩家庭预算，并可能降低社会稳定。',
     effects: {
       inflation: 0.1,
-      socialStability: -5
+      socialStability: -5,
+      demandMultiplier: {
+        entertainment: 0.72,
+        luxury: 0.62,
+      },
     },
     probability: 0.1,
     duration: 2,
@@ -1091,7 +1114,13 @@ export const RANDOM_EVENTS: RandomEvent[] = [
       employment: -10,
       socialStability: -5,
       stockMarket: { indexChange: -0.1, volatilityChange: 0.15 },
-      cycleShift: 'downturn'
+      cycleShift: 'downturn',
+      demandMultiplier: {
+        food: 0.86,
+        daily_necessities: 0.9,
+        entertainment: 0.55,
+        luxury: 0.42,
+      },
     },
     probability: 0.1,
     duration: 2,
@@ -1109,7 +1138,13 @@ export const RANDOM_EVENTS: RandomEvent[] = [
       inflation: 0.03,
       employment: 8,
       socialStability: 5,
-      stockMarket: { indexChange: 0.08, volatilityChange: 0.05 }
+      stockMarket: { indexChange: 0.08, volatilityChange: 0.05 },
+      demandMultiplier: {
+        food: 1.08,
+        daily_necessities: 1.12,
+        entertainment: 1.25,
+        luxury: 1.18,
+      },
     },
     probability: 0.12
   }

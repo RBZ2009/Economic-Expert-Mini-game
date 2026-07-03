@@ -19,6 +19,7 @@ import {
   getProcessingCost,
   getProductionCapacityUsage,
 } from '@/game/company-economics';
+import { applyDemandMultiplier, getBaselineMarketDemand, scaleHouseholdDemand } from '@/game/market';
 import {
   GameState,
   Player,
@@ -299,10 +300,16 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
     name: '经济繁荣',
     description: '经济蓬勃发展，所有人收入增加20%！',
     icon: '📈',
-    effects: { inflation: -0.01, employment: 5, socialStability: 5, stockMarket: { indexChange: 0.08, volatilityChange: -0.03 } },
+    effects: {
+      inflation: -0.01,
+      employment: 5,
+      socialStability: 5,
+      stockMarket: { indexChange: 0.08, volatilityChange: -0.03 },
+      demandMultiplier: { food: 1.08, daily_necessities: 1.12, entertainment: 1.35, luxury: 1.25 },
+    },
     effect: (state) => ({
       ...state,
-      market: { ...state.market, inflationRate: Math.max(-0.05, state.market.inflationRate - 0.01) },
+      market: applyDemandMultiplier({ ...state.market, inflationRate: Math.max(-0.05, state.market.inflationRate - 0.01) }, { food: 1.08, daily_necessities: 1.12, entertainment: 1.35, luxury: 1.25 }),
     }),
   },
   {
@@ -335,13 +342,18 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
     icon: '📉',
     duration: 2,
     warning: '市场波动会延续，投资者需降低集中仓位和杠杆风险。',
-    effects: { employment: -5, socialStability: -6, stockMarket: { indexChange: -0.3, volatilityChange: 0.25 } },
+    effects: {
+      employment: -5,
+      socialStability: -6,
+      stockMarket: { indexChange: -0.3, volatilityChange: 0.25 },
+      demandMultiplier: { entertainment: 0.62, luxury: 0.45 },
+    },
     effect: (state) => ({
       ...state,
-      market: {
+      market: applyDemandMultiplier({
         ...state.market,
         stockMarket: { ...state.market.stockMarket, index: state.market.stockMarket.index * 0.7 },
-      },
+      }, { entertainment: 0.62, luxury: 0.45 }),
       players: state.players.map(p => ({
         ...p,
         assets: p.assets.map(a => 
@@ -357,9 +369,10 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
     icon: '🦠',
     duration: 2,
     warning: '健康风险会影响劳动效率，建议储备医疗和现金。',
-    effects: { employment: -4, socialStability: -5 },
+    effects: { employment: -4, socialStability: -5, demandMultiplier: { healthcare: 1.35, entertainment: 0.7, luxury: 0.65 } },
     effect: (state) => ({
       ...state,
+      market: applyDemandMultiplier(state.market, { healthcare: 1.35, entertainment: 0.7, luxury: 0.65 }),
       players: state.players.map(p => ({
         ...p,
         health: Math.max(0, p.health - 15),
@@ -372,9 +385,10 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
     name: '意外之财',
     description: '你发现了隐藏的财富，所有人现金+5000！',
     icon: '💎',
-    effects: { socialStability: 2 },
+    effects: { socialStability: 2, demandMultiplier: { entertainment: 1.2, luxury: 1.18 } },
     effect: (state) => ({
       ...state,
+      market: applyDemandMultiplier(state.market, { entertainment: 1.2, luxury: 1.18 }),
       players: state.players.map(p => ({
         ...p,
         cash: p.cash + 5000,
@@ -388,10 +402,10 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
     icon: '⚠️',
     duration: 2,
     warning: '稳定度下行会影响就业和政策空间，政府应优先修复民生。',
-    effects: { socialStability: -5, employment: -2 },
+    effects: { socialStability: -5, employment: -2, demandMultiplier: { entertainment: 0.75, luxury: 0.7 } },
     effect: (state) => ({
       ...state,
-      market: { ...state.market, socialStability: Math.max(0, state.market.socialStability - 5) },
+      market: applyDemandMultiplier({ ...state.market, socialStability: Math.max(0, state.market.socialStability - 5) }, { entertainment: 0.75, luxury: 0.7 }),
       players: state.players.map(p => ({
         ...p,
         happiness: Math.max(0, p.happiness - 10),
@@ -403,10 +417,10 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
     name: '技术突破',
     description: '科技进步，投资者收益+50%',
     icon: '🔬',
-    effects: { employment: 3, stockMarket: { indexChange: 0.12, volatilityChange: 0.05 } },
+    effects: { employment: 3, stockMarket: { indexChange: 0.12, volatilityChange: 0.05 }, demandMultiplier: { daily_necessities: 1.08, entertainment: 1.12, luxury: 1.08 } },
     effect: (state) => ({
       ...state,
-      market: { ...state.market, stockMarket: { ...state.market.stockMarket, trend: 'bull' as const } },
+      market: applyDemandMultiplier({ ...state.market, stockMarket: { ...state.market.stockMarket, trend: 'bull' as const } }, { daily_necessities: 1.08, entertainment: 1.12, luxury: 1.08 }),
     }),
   },
   {
@@ -445,7 +459,7 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
     name: '市场过剩',
     description: '商品供应过剩，食品和日用品价格-10%',
     icon: '📦',
-    effects: { inflation: -0.01, specificGoodPrice: { goodType: 'food', multiplier: 0.9 } },
+    effects: { inflation: -0.01, specificGoodPrice: { goodType: 'food', multiplier: 0.9 }, demandMultiplier: { food: 0.85, daily_necessities: 0.85 } },
     effect: (state) => {
       const newGoods = { ...state.market.goods };
       ['food', 'daily_necessities'].forEach(key => {
@@ -459,7 +473,7 @@ const RANDOM_EVENTS: RandomEventConfig[] = [
       });
       return {
         ...state,
-        market: { ...state.market, goods: newGoods },
+        market: applyDemandMultiplier({ ...state.market, goods: newGoods }, { food: 0.85, daily_necessities: 0.85 }),
       };
     },
   },
@@ -2347,7 +2361,7 @@ function settleRound(gameState: GameState): GameState {
   });
 
   const playersWithMarketShare = recalculateMarketShare(players, monthlyCompanySales);
-  const householdDemand = calculateHouseholdDemand(playersWithMarketShare);
+  const householdDemand = scaleHouseholdDemand(calculateHouseholdDemand(playersWithMarketShare));
   Object.keys(market.goods).forEach(key => {
     const goodType = key as GoodType;
     const good = market.goods[goodType];
@@ -2361,7 +2375,7 @@ function settleRound(gameState: GameState): GameState {
     good.currentPrice = Math.max(good.basePrice * 0.3, Math.min(good.basePrice * 3, newPrice));
     good.priceHistory.push(good.currentPrice);
     if (good.priceHistory.length > 10) good.priceHistory.shift();
-    const baselineDemand = householdDemand[goodType] ?? 20;
+    const baselineDemand = Math.max(getBaselineMarketDemand(goodType), householdDemand[goodType] ?? 20);
     sd.demand = Math.max(baselineDemand, sd.demand * 0.72 + baselineDemand * 0.28);
     sd.supply = Math.max(5, sd.supply * 0.82);
   });

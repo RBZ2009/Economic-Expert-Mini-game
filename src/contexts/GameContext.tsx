@@ -52,6 +52,7 @@ import {
   getProcessingCost,
   getProductionCapacityUsage,
 } from '@/game/company-economics';
+import { createInitialSupplyDemand, getBaselineMarketDemand, scaleHouseholdDemand } from '@/game/market';
 
 // ==================== 类型定义 ====================
 
@@ -551,16 +552,7 @@ const createInitialMarket = (): Market => ({
   employmentRate: 70,
   giniCoefficient: 0.4,
   socialStability: 75,
-  supplyDemand: {
-    food: { supply: 100, demand: 100 },
-    daily_necessities: { supply: 100, demand: 100 },
-    housing: { supply: 50, demand: 50 },
-    transportation: { supply: 100, demand: 100 },
-    entertainment: { supply: 50, demand: 50 },
-    luxury: { supply: 20, demand: 20 },
-    education: { supply: 30, demand: 30 },
-    healthcare: { supply: 50, demand: 50 },
-  },
+  supplyDemand: createInitialSupplyDemand(),
   economicCycle: 'growth',
   cyclePhase: 0,
   globalTaxRate: 0.2,
@@ -2611,7 +2603,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
       newMarket.monthlyTaxRevenue = Math.round(taxRevenue * 100) / 100;
 
       // 更新市场价格
-      const householdDemand = calculateHouseholdDemand(finalPlayers);
+      const householdDemand = scaleHouseholdDemand(calculateHouseholdDemand(finalPlayers));
       Object.keys(newMarket.goods).forEach(key => {
         const good = newMarket.goods[key as GoodType];
         const sd = newMarket.supplyDemand[key as GoodType];
@@ -2632,7 +2624,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
           currentPrice: Math.max(good.basePrice * 0.3, Math.min(good.basePrice * 3, newPrice)),
         };
 
-        const baselineDemand = householdDemand[key as GoodType] ?? 20;
+        const baselineDemand = Math.max(getBaselineMarketDemand(key as GoodType), householdDemand[key as GoodType] ?? 20);
         sd.demand = Math.max(baselineDemand, sd.demand * 0.72 + baselineDemand * 0.28);
         sd.supply = Math.max(5, sd.supply * 0.82);
       });

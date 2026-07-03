@@ -1,4 +1,5 @@
 import { GameState, GoodType, RandomEvent } from '@/types/game';
+import { applyDemandMultiplier } from '@/game/market';
 
 const generateId = () => Math.random().toString(36).substring(2, 15);
 
@@ -20,6 +21,7 @@ export const NEWS_EVENTS: NewsTemplate[] = [
       inflation: 0.02,
       socialStability: -2,
       specificGoodPrice: { goodType: 'food', multiplier: 1.18 },
+      demandMultiplier: { food: 1.18 },
     },
     probability: 0.15,
     duration: 1,
@@ -72,6 +74,12 @@ export const NEWS_EVENTS: NewsTemplate[] = [
       employment: 3,
       socialStability: 2,
       stockMarket: { indexChange: 0.06, volatilityChange: 0.02 },
+      demandMultiplier: {
+        food: 1.08,
+        daily_necessities: 1.1,
+        entertainment: 1.35,
+        luxury: 1.25,
+      },
     },
     probability: 0.16,
     duration: 1,
@@ -106,6 +114,11 @@ export const NEWS_EVENTS: NewsTemplate[] = [
       employment: 4,
       stockMarket: { indexChange: 0.08, volatilityChange: 0.03 },
       cycleShift: 'growth',
+      demandMultiplier: {
+        daily_necessities: 1.08,
+        entertainment: 1.12,
+        luxury: 1.08,
+      },
     },
     probability: 0.15,
     duration: 1,
@@ -160,10 +173,13 @@ export function applyNewsEvent(state: GameState, event: RandomEvent): GameState 
       };
     }
   }
+  const demandAdjustedMarket = event.effects.demandMultiplier
+    ? applyDemandMultiplier(market, event.effects.demandMultiplier)
+    : market;
 
   return {
     ...state,
-    market,
+    market: demandAdjustedMarket,
     currentNews: event,
     recentEvent: event,
     eventHistory: [...state.eventHistory, event],
