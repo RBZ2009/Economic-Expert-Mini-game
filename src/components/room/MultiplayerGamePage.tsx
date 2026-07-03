@@ -28,6 +28,14 @@ import {
 } from '@/types/game';
 import { estimateProductSales, getProductInventory, productionGoodTypes } from '@/components/game/company-helpers';
 import { getJobOffers, getWorkerCurrentJob, getWorkerEducationLevel, getWorkerExperience, isQualifiedForJob } from '@/game/jobs';
+import {
+  getCompanyCapacityUnits,
+  getEstimatedUnitVariableCost,
+  getMaterialPurchaseCost,
+  getMaterialUnitPrice,
+  getMaxProductionByCapacity,
+  getUnitProcessingCost,
+} from '@/game/company-economics';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -1327,9 +1335,9 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
       saleConfig.maxSellingPrice,
       ...(lockedSalePrice !== undefined ? [lockedSalePrice] : []),
     ])).sort((a, b) => a - b);
-    const totalCapacity = company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity;
+    const totalCapacity = getCompanyCapacityUnits(company);
     const remainingCapacity = Math.max(0, totalCapacity - (company.productionUsedThisRound || 0));
-    const productionUnitCashCost = ECONOMY_BALANCE.company.processingCostPerUnit;
+    const productionUnitCashCost = getUnitProcessingCost(company.productionType);
     const currentRoundSales = Object.values(company.salesDecisions ?? {}).filter((sale) => sale?.round === gameState.currentRound);
     const actualRoundGrossRevenue = currentRoundSales.reduce((total, sale) => total + (sale?.grossRevenue ?? 0), 0);
     const actualRoundNetRevenue = currentRoundSales.reduce((total, sale) => total + (sale?.netRevenue ?? 0), 0);
@@ -1426,11 +1434,11 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           <div className="mt-2 p-2 bg-muted/50 rounded text-xs">
             <div className="flex justify-between">
               <span>员工产能:</span>
-              <span>每人 {ECONOMY_BALANCE.company.employeeCapacity} 件/月</span>
+              <span>每人 {ECONOMY_BALANCE.company.employeeCapacity} 产能点/月</span>
             </div>
             <div className="flex justify-between">
               <span>机器产能:</span>
-              <span>基础每台 {ECONOMY_BALANCE.company.machineCapacity} 件/月</span>
+              <span>基础每台 {ECONOMY_BALANCE.company.machineCapacity} 产能点/月</span>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-2 mt-2">
@@ -1450,26 +1458,24 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           </h5>
           
           <div className="flex gap-2">
-            <Button 
-              size="sm" 
-              variant="outline"
-              disabled={myPlayer.cash < 500}
-              onClick={() => sendAction({ type: 'BUY_MATERIALS', payload: { playerId: myPlayer.id, quantity: 10 } })}
-            >
-              采购 10 单位 (¥500)
-            </Button>
-            <Button 
-              size="sm" 
-              variant="outline"
-              disabled={myPlayer.cash < 2000}
-              onClick={() => sendAction({ type: 'BUY_MATERIALS', payload: { playerId: myPlayer.id, quantity: 50 } })}
-            >
-              批量采购 50 单位 (¥2,000)
-            </Button>
+            {[50, 200].map(quantity => {
+              const totalCost = getMaterialPurchaseCost(quantity, company);
+              return (
+                <Button 
+                  key={quantity}
+                  size="sm" 
+                  variant="outline"
+                  disabled={myPlayer.cash < totalCost}
+                  onClick={() => sendAction({ type: 'BUY_MATERIALS', payload: { playerId: myPlayer.id, quantity } })}
+                >
+                  采购 {quantity} 单位 (¥{formatCurrency(totalCost)})
+                </Button>
+              );
+            })}
           </div>
           
           <div className="mt-2 text-xs text-muted-foreground">
-            市场价格: ¥{formatCurrency(ECONOMY_BALANCE.company.materialPrice)}/单位 | 当前持有: {company.rawMaterials || 0} 单位
+            当前约 ¥{formatCurrency(getMaterialUnitPrice(100, company))}/单位；批量采购和适度规模会降低单价，过度扩张会推高土地与物流成本。当前持有: {company.rawMaterials || 0} 单位
           </div>
         </div>
 
@@ -1482,9 +1488,10 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           {/* 产能信息 */}
           {(() => {
             const usedThisRound = company.productionUsedThisRound || 0;
-            const maxByMaterials = company.rawMaterials || 0;
+            const maxByCapacity = getMaxProductionByCapacity(totalCapacity, usedThisRound, company.productionType);
+            const maxByMaterials = Math.floor((company.rawMaterials || 0) / PRODUCTION_CONFIGS[company.productionType].materialConsumption);
             const maxByCash = Math.floor(myPlayer.cash / productionUnitCashCost);
-            const maxProduction = Math.min(remainingCapacity, maxByMaterials, maxByCash);
+            const maxProduction = Math.min(maxByCapacity, maxByMaterials, maxByCash);
             
             return (
               <div className="mb-2 p-2 bg-blue-50 dark:bg-blue-950/30 rounded text-xs">
@@ -1494,15 +1501,15 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
                 </div>
                 <div className="flex justify-between mt-1">
                   <span>总产能:</span>
-                  <span>{totalCapacity} 件</span>
+                  <span>{totalCapacity} 点</span>
                 </div>
                 <div className="flex justify-between">
                   <span>已使用:</span>
-                  <span className="text-orange-600">-{usedThisRound} 件</span>
+                  <span className="text-orange-600">-{usedThisRound} 点</span>
                 </div>
                 <div className="flex justify-between">
                   <span>剩余产能:</span>
-                  <span>{remainingCapacity} 件</span>
+                  <span>{remainingCapacity} 点</span>
                 </div>
                 <div className="flex justify-between">
                   <span>原材料限制:</span>
@@ -1514,11 +1521,11 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
                 </div>
                 <div className="flex justify-between">
                   <span>员工贡献:</span>
-                  <span>{company.employees} 人 × {ECONOMY_BALANCE.company.employeeCapacity} = {company.employees * ECONOMY_BALANCE.company.employeeCapacity} 件</span>
+                  <span>{company.employees} 人 × {ECONOMY_BALANCE.company.employeeCapacity} = {company.employees * ECONOMY_BALANCE.company.employeeCapacity} 点</span>
                 </div>
                 <div className="flex justify-between">
                   <span>机器贡献:</span>
-                  <span>{company.machines} 台 × {ECONOMY_BALANCE.company.machineCapacity} = {company.machines * ECONOMY_BALANCE.company.machineCapacity} 件</span>
+                  <span>{company.machines} 台 × {ECONOMY_BALANCE.company.machineCapacity} = {company.machines * ECONOMY_BALANCE.company.machineCapacity} 点</span>
                 </div>
               </div>
             );
@@ -1529,10 +1536,15 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
             <div className="text-xs text-muted-foreground mb-1">选择生产类型:</div>
             <div className="grid grid-cols-4 gap-1">
               {[
-                { id: 'daily_necessities', icon: '🧴', name: '日用品', cost: 20, price: '¥40-60' },
-                { id: 'food', icon: '🍞', name: '食品', cost: 25, price: '¥50-80' },
-                { id: 'entertainment', icon: '🎮', name: '娱乐', cost: 35, price: '¥70-120' },
-                { id: 'luxury', icon: '💎', name: '奢侈品', cost: 50, price: '¥100-200' },
+                ...productionGoodTypes.map((type) => {
+                  const config = PRODUCTION_CONFIGS[type];
+                  return {
+                    id: type,
+                    icon: config.icon,
+                    name: config.name,
+                    cost: Math.round(getEstimatedUnitVariableCost(type, company)),
+                  };
+                }),
               ].map(type => (
                 <Button
                   key={type.id}
@@ -1544,7 +1556,7 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
                   <div className="flex min-w-0 flex-col items-center justify-center leading-tight">
                     <div className="text-lg leading-none">{type.icon}</div>
                     <div className="mt-1 w-full truncate text-xs">{type.name}</div>
-                    <div className="mt-0.5 w-full truncate text-xs text-muted-foreground">¥{type.cost}/件</div>
+	                    <div className="mt-0.5 w-full truncate text-xs text-muted-foreground">¥{type.cost}/件</div>
                   </div>
                 </Button>
               ))}
@@ -1559,10 +1571,19 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
                 placeholder="输入数量"
                 min={1}
                 max={(() => {
-                  return Math.min(remainingCapacity, company.rawMaterials || 0, Math.floor(myPlayer.cash / productionUnitCashCost));
+                  return Math.min(
+                    getMaxProductionByCapacity(totalCapacity, company.productionUsedThisRound || 0, company.productionType),
+                    Math.floor((company.rawMaterials || 0) / PRODUCTION_CONFIGS[company.productionType].materialConsumption),
+                    Math.floor(myPlayer.cash / productionUnitCashCost),
+                  );
                 })()}
                 defaultValue={(() => {
-                  return Math.min(5, remainingCapacity, company.rawMaterials || 0, Math.floor(myPlayer.cash / productionUnitCashCost));
+                  return Math.min(
+                    5,
+                    getMaxProductionByCapacity(totalCapacity, company.productionUsedThisRound || 0, company.productionType),
+                    Math.floor((company.rawMaterials || 0) / PRODUCTION_CONFIGS[company.productionType].materialConsumption),
+                    Math.floor(myPlayer.cash / productionUnitCashCost),
+                  );
                 })()}
                 className="w-24"
                 id="produce-quantity"
@@ -1572,16 +1593,16 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
                 variant="default"
                 className="flex-1"
                 disabled={
-                  remainingCapacity === 0 || 
-                  (company.rawMaterials || 0) === 0 || 
-                  myPlayer.cash < productionUnitCashCost
+	                  getMaxProductionByCapacity(totalCapacity, company.productionUsedThisRound || 0, company.productionType) === 0 || 
+	                  (company.rawMaterials || 0) === 0 || 
+	                  myPlayer.cash < productionUnitCashCost
                 }
                 onClick={() => {
                   const input = document.getElementById('produce-quantity') as HTMLInputElement;
                   const maxVal = Math.max(0, Math.min(
-                    remainingCapacity,
-                    company.rawMaterials || 0,
-                    Math.floor(myPlayer.cash / productionUnitCashCost)
+	                    getMaxProductionByCapacity(totalCapacity, company.productionUsedThisRound || 0, company.productionType),
+	                    Math.floor((company.rawMaterials || 0) / PRODUCTION_CONFIGS[company.productionType].materialConsumption),
+	                    Math.floor(myPlayer.cash / productionUnitCashCost)
                   ));
                   const quantity = Math.min(parseInt(input?.value) || 1, maxVal);
                   sendAction({ type: 'PRODUCE_GOODS', payload: { playerId: myPlayer.id, quantity } });

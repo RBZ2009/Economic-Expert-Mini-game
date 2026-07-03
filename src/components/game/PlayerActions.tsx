@@ -10,6 +10,14 @@ import { GoodType, PROFESSION_CONFIGS, INVESTMENT_CONFIGS, MACHINE_CONFIGS, Hous
 import { estimateProductSales, getProductInventory, productionGoodTypes } from './company-helpers';
 import { ActionSection, ActionWorkspace, MetricStrip, StatusBadge, type ActionAdapter } from './workbench';
 import { getJobOffers, getWorkerCurrentJob, getWorkerEducationLevel, getWorkerExperience, isQualifiedForJob } from '@/game/jobs';
+import {
+  getCompanyCapacityUnits,
+  getEstimatedUnitVariableCost,
+  getMaterialPurchaseCost,
+  getMaterialUnitPrice,
+  getMaxProductionByCapacity,
+  getUnitProcessingCost,
+} from '@/game/company-economics';
 
 // ==================== 商品效果说明表 ====================
 const GOOD_EFFECTS_DISPLAY: Record<GoodType, {
@@ -1200,8 +1208,9 @@ function EntrepreneurActions() {
                     )}
                   </div>
                   <div className="text-xs text-muted-foreground space-y-0.5">
-                    <div>成本: ¥{config.baseProductionCost + config.baseMaterialCost}/单位</div>
+                    <div>变动成本: 约¥{formatCurrency(getEstimatedUnitVariableCost(type as ProductionGoodType, company))}/单位</div>
                     <div>售价: ¥{config.baseSellingPrice}/单位</div>
+                    <div>产能: {config.capacityCost} 点/件</div>
                     <div className="text-muted-foreground/70">{config.description}</div>
                   </div>
                 </button>
@@ -1219,12 +1228,16 @@ function EntrepreneurActions() {
             </h4>
             <div className="grid grid-cols-2 gap-2 text-sm mb-3">
               <div className="flex justify-between">
-                <span>单位生产成本:</span>
-                <span className="font-medium text-red-600">-¥{PRODUCTION_CONFIGS[company.productionType].baseProductionCost}</span>
+                <span>单位加工费:</span>
+                <span className="font-medium text-red-600">-¥{formatCurrency(getUnitProcessingCost(company.productionType))}</span>
               </div>
               <div className="flex justify-between">
                 <span>单位原材料:</span>
                 <span className="font-medium">-{PRODUCTION_CONFIGS[company.productionType].materialConsumption}单位</span>
+              </div>
+              <div className="flex justify-between">
+                <span>单位产能:</span>
+                <span className="font-medium">{PRODUCTION_CONFIGS[company.productionType].capacityCost} 点/件</span>
               </div>
               <div className="flex justify-between">
                 <span>原材料库存:</span>
@@ -1236,7 +1249,7 @@ function EntrepreneurActions() {
               </div>
               <div className="flex justify-between">
                 <span>产能上限:</span>
-                <span className="font-medium">{company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity}件/月</span>
+                <span className="font-medium">{getCompanyCapacityUnits(company)}点/月</span>
               </div>
             </div>
             
@@ -1252,6 +1265,10 @@ function EntrepreneurActions() {
                 <div className="flex justify-between text-muted-foreground">
                   <span>售价:</span>
                   <span>¥{PRODUCTION_CONFIGS[company.productionType].baseSellingPrice}</span>
+                </div>
+                <div className="flex justify-between text-muted-foreground">
+                  <span>原料采购价:</span>
+                  <span>约 ¥{formatCurrency(getMaterialUnitPrice(100, company))}/单位</span>
                 </div>
               </div>
             </div>
@@ -1312,8 +1329,7 @@ function EntrepreneurActions() {
                     <span className="font-medium text-red-600">
                       -¥{formatCurrency(
                         company.autoProduction.monthlyTarget * 
-                        (PRODUCTION_CONFIGS[company.productionType].baseProductionCost + 
-                         PRODUCTION_CONFIGS[company.productionType].baseMaterialCost)
+                        getEstimatedUnitVariableCost(company.productionType, company, company.autoProduction.monthlyTarget)
                       )}
                     </span>
                   </div>
@@ -1326,12 +1342,11 @@ function EntrepreneurActions() {
                   <div className="flex justify-between mt-1">
                     <span>预估利润:</span>
                     <span className="font-medium text-green-600">
-                      ¥{formatCurrency(
-                        company.autoProduction.monthlyTarget * PRODUCTION_CONFIGS[company.productionType].baseSellingPrice -
-                        company.autoProduction.monthlyTarget * 
-                        (PRODUCTION_CONFIGS[company.productionType].baseProductionCost + 
-                         PRODUCTION_CONFIGS[company.productionType].baseMaterialCost)
-                      )}
+	                      ¥{formatCurrency(
+	                        company.autoProduction.monthlyTarget * PRODUCTION_CONFIGS[company.productionType].baseSellingPrice -
+	                        company.autoProduction.monthlyTarget * 
+	                        getEstimatedUnitVariableCost(company.productionType, company, company.autoProduction.monthlyTarget)
+	                      )}
                     </span>
                   </div>
                   <div className="flex justify-between mt-1">
@@ -1339,7 +1354,7 @@ function EntrepreneurActions() {
                     <span className="font-medium">
                       {Math.min(
                         company.autoProduction.monthlyTarget, 
-                        company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity, 
+                        getMaxProductionByCapacity(getCompanyCapacityUnits(company), 0, company.productionType), 
                         Math.floor(company.rawMaterials / PRODUCTION_CONFIGS[company.productionType].materialConsumption)
                       )}件
                     </span>
@@ -1352,7 +1367,30 @@ function EntrepreneurActions() {
             </p>
           </div>
 
-          {/* 手动生产面板（自动生产关闭时显示） */}
+          <div className="p-3 border rounded-lg">
+            <h4 className="font-medium mb-3">📦 原材料采购</h4>
+            <div className="grid grid-cols-2 gap-2">
+              {[50, 200].map(quantity => {
+                const totalCost = getMaterialPurchaseCost(quantity, company);
+                return (
+                  <Button
+                    key={quantity}
+                    size="sm"
+                    variant="outline"
+                    disabled={currentPlayer.cash < totalCost}
+                    onClick={() => dispatch({ type: 'BUY_MATERIALS', payload: { playerId: currentPlayer.id, quantity } })}
+                  >
+                    采购 {quantity} 单位 (¥{formatCurrency(totalCost)})
+                  </Button>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              当前约 ¥{formatCurrency(getMaterialUnitPrice(100, company))}/单位；批量采购和适度规模会降低单价，过度扩张会推高土地与物流成本。
+            </p>
+          </div>
+
+              {/* 手动生产面板（自动生产关闭时显示） */}
           {!company.autoProduction.enabled && (
             <div className="p-3 border rounded-lg border-amber-200 dark:border-amber-800">
               <h4 className="font-medium mb-3 flex items-center gap-2">
@@ -1360,12 +1398,13 @@ function EntrepreneurActions() {
               </h4>
               <div className="space-y-2 mb-3">
                 {(() => {
-                  const totalCapacity = company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity;
+                  const totalCapacity = getCompanyCapacityUnits(company);
                   const usedThisRound = company.productionUsedThisRound || 0;
                   const remainingCapacity = Math.max(0, totalCapacity - usedThisRound);
-                  const maxByMaterials = company.rawMaterials || 0;
-                  const maxByCash = Math.floor(currentPlayer.cash / ECONOMY_BALANCE.company.processingCostPerUnit);
-                  const maxProduction = Math.min(remainingCapacity, maxByMaterials, maxByCash);
+                  const maxByCapacity = getMaxProductionByCapacity(totalCapacity, usedThisRound, company.productionType);
+                  const maxByMaterials = Math.floor((company.rawMaterials || 0) / PRODUCTION_CONFIGS[company.productionType].materialConsumption);
+                  const maxByCash = Math.floor(currentPlayer.cash / getUnitProcessingCost(company.productionType));
+                  const maxProduction = Math.min(maxByCapacity, maxByMaterials, maxByCash);
                   
                   return (
                     <>
@@ -1374,7 +1413,7 @@ function EntrepreneurActions() {
                       </div>
                       <div className="grid grid-cols-3 gap-2 text-xs">
                         <div className="p-2 bg-muted/30 rounded">
-                          <span className="text-muted-foreground">总产能:</span>
+	                          <span className="text-muted-foreground">总产能:</span>
                           <span className="ml-1 font-medium">{totalCapacity}</span>
                         </div>
                         <div className="p-2 bg-muted/30 rounded">
@@ -1382,7 +1421,7 @@ function EntrepreneurActions() {
                           <span className="ml-1 font-medium text-orange-600">{usedThisRound}</span>
                         </div>
                         <div className="p-2 bg-muted/30 rounded">
-                          <span className="text-muted-foreground">剩余:</span>
+	                          <span className="text-muted-foreground">剩余:</span>
                           <span className="ml-1 font-medium">{remainingCapacity}</span>
                         </div>
                         <div className="p-2 bg-muted/30 rounded">
@@ -1400,12 +1439,12 @@ function EntrepreneurActions() {
               </div>
               
               {(() => {
-                const totalCapacity = company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity;
+                const totalCapacity = getCompanyCapacityUnits(company);
                 const usedThisRound = company.productionUsedThisRound || 0;
-                const remainingCapacity = Math.max(0, totalCapacity - usedThisRound);
-                const maxByMaterials = company.rawMaterials || 0;
-                const maxByCash = Math.floor(currentPlayer.cash / ECONOMY_BALANCE.company.processingCostPerUnit);
-                const maxProduction = Math.min(remainingCapacity, maxByMaterials, maxByCash);
+                const maxByCapacity = getMaxProductionByCapacity(totalCapacity, usedThisRound, company.productionType);
+                const maxByMaterials = Math.floor((company.rawMaterials || 0) / PRODUCTION_CONFIGS[company.productionType].materialConsumption);
+                const maxByCash = Math.floor(currentPlayer.cash / getUnitProcessingCost(company.productionType));
+                const maxProduction = Math.min(maxByCapacity, maxByMaterials, maxByCash);
                 
                 return (
                   <>
@@ -1422,7 +1461,7 @@ function EntrepreneurActions() {
                     </div>
                     
                     <div className="text-xs text-muted-foreground mb-3">
-                      成本：¥20/件 | 消耗原料：1单位/件
+                      加工费：¥{formatCurrency(getUnitProcessingCost(company.productionType))}/件 | 消耗原料：{PRODUCTION_CONFIGS[company.productionType].materialConsumption}单位/件 | 产能：{PRODUCTION_CONFIGS[company.productionType].capacityCost}点/件
                     </div>
                     
                     <Button 

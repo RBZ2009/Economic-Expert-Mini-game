@@ -9,6 +9,16 @@ import { applyMultiplayerGameAction, MultiplayerActionHandlers } from '@/game/en
 import { createInitialGameState, createInitialPlayer } from '@/game/initial-state';
 import { applyNewsEvent, pickNewsEvent } from '@/game/news';
 import { getJobOffers, getWorkerCurrentJob, isQualifiedForJob } from '@/game/jobs';
+import { estimateProductSales } from '@/components/game/company-helpers';
+import {
+  getCompanyCapacityUnits,
+  getEffectiveCapacityUnits,
+  getMaterialPurchaseCost,
+  getMaterialUnitPrice,
+  getMaxProductionByCapacity,
+  getProcessingCost,
+  getProductionCapacityUsage,
+} from '@/game/company-economics';
 import {
   GameState,
   Player,
@@ -241,22 +251,6 @@ function getProductInventory(company: Company): Record<ProductionGoodType, numbe
 
 function getTotalProductInventory(productInventory: Record<ProductionGoodType, number>): number {
   return Object.values(productInventory).reduce((sum, value) => sum + value, 0);
-}
-
-function estimateProductSales(
-  market: GameState['market'],
-  company: Company,
-  productType: ProductionGoodType,
-  quantity: number,
-  pricePerUnit: number,
-): number {
-  const prodConfig = PRODUCTION_CONFIGS[productType];
-  const sd = market.supplyDemand[productType];
-  const demandSupplyRatio = sd.demand / Math.max(1, sd.supply);
-  const qualityFactor = 0.8 + company.productQuality / 100;
-  const reputationFactor = 0.75 + company.reputation / 160;
-  const priceFactor = Math.pow(prodConfig.baseSellingPrice / Math.max(1, pricePerUnit), prodConfig.demandElasticity);
-  return Math.max(0, Math.min(quantity, Math.floor(quantity * prodConfig.marketDemand * demandSupplyRatio * qualityFactor * reputationFactor * priceFactor)));
 }
 
 function calculateVictoryScores(players: Player[], market: GameState['market']): GameState['victoryScores'] {
@@ -1387,7 +1381,7 @@ function handleHireEmployee(room: GameRoom, playerId: string, count: number): { 
       company: {
         ...p.company!,
         employees: p.company!.employees + count,
-        productionCapacity: p.company!.productionCapacity + ECONOMY_BALANCE.company.employeeCapacity * count,
+        productionCapacity: getCompanyCapacityUnits({ ...p.company!, employees: p.company!.employees + count }),
         morale: Math.min(100, p.company!.morale + 5),
       },
     };
@@ -1424,7 +1418,7 @@ function handleBuyMachine(room: GameRoom, playerId: string, machineType: string)
       company: {
         ...p.company!,
         machines: p.company!.machines + 1,
-        productionCapacity: p.company!.productionCapacity + machineConfig.capacityGain,
+        productionCapacity: getCompanyCapacityUnits({ ...p.company!, machines: p.company!.machines + 1 }),
         efficiency: Math.min(100, p.company!.efficiency + 10),
       },
     };
@@ -1446,8 +1440,8 @@ function handleBuyMaterials(room: GameRoom, playerId: string, quantity: number):
   const blockReason = isPlayerActionBlocked(room, playerId);
   if (blockReason) return { success: false, error: blockReason };
 
-  const materialPrice = ECONOMY_BALANCE.company.materialPrice;
-  const totalCost = materialPrice * quantity;
+  const materialPrice = getMaterialUnitPrice(quantity, player.company);
+  const totalCost = getMaterialPurchaseCost(quantity, player.company);
   
   if (player.cash < totalCost) {
     return { success: false, error: `资金不足，需要 ¥${totalCost}，当前现金 ¥${player.cash}` };
@@ -1460,12 +1454,24 @@ function handleBuyMaterials(room: GameRoom, playerId: string, quantity: number):
       cash: p.cash - totalCost,
       company: {
         ...p.company!,
-        rawMaterials: (p.company!.rawMaterials || 0) + quantity,
-      },
-    };
-  });
+            rawMaterials: (p.company!.rawMaterials || 0) + quantity,
+            costs: p.company!.costs + totalCost,
+            cashFlow: {
+              ...p.company!.cashFlow,
+              expenses: p.company!.cashFlow.expenses + totalCost,
+              productionCosts: p.company!.cashFlow.productionCosts + totalCost,
+              final: p.company!.cashFlow.final - totalCost,
+            },
+            stats: {
+              ...p.company!.stats,
+              totalCosts: p.company!.stats.totalCosts + totalCost,
+            },
+          },
+        };
+      });
 
   roomManager.updateGameState(room.id, room.gameState);
+  console.log(`[BuyMaterials] player=${playerId}, quantity=${quantity}, unitPrice=${materialPrice}, totalCost=${totalCost}`);
   return { success: true };
 }
 
@@ -1487,7 +1493,9 @@ function handleProduceGoods(room: GameRoom, playerId: string, quantity: number):
 
   const company = player.company;
   
-  const totalCapacity = company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity;
+  const totalCapacity = getCompanyCapacityUnits(company);
+  const usedCapacity = company.productionUsedThisRound || 0;
+  const maxByCapacity = getMaxProductionByCapacity(totalCapacity, usedCapacity, company.productionType);
   
   // 检查产能
   if (totalCapacity === 0) {
@@ -1495,8 +1503,8 @@ function handleProduceGoods(room: GameRoom, playerId: string, quantity: number):
   }
   
   // 检查请求数量是否超过产能
-  if (quantity > totalCapacity) {
-    return { success: false, error: `请求数量 ${quantity} 超过产能 ${totalCapacity}，本轮最多生产 ${totalCapacity} 件` };
+  if (quantity > maxByCapacity) {
+    return { success: false, error: `请求数量 ${quantity} 超过剩余产能，本轮最多生产 ${maxByCapacity} 件` };
   }
   
   const prodConfig = PRODUCTION_CONFIGS[company.productionType];
@@ -1507,21 +1515,22 @@ function handleProduceGoods(room: GameRoom, playerId: string, quantity: number):
   }
 
   // 原材料在采购时已付费，生产时只扣加工费，避免重复扣材料现金。
-  const processingCost = ECONOMY_BALANCE.company.processingCostPerUnit * quantity;
+  const processingCost = getProcessingCost(company.productionType, quantity);
   if (player.cash < processingCost) {
     return { success: false, error: `资金不足，需要 ¥${processingCost}，当前现金 ¥${player.cash}` };
   }
 
   // 实际产出：取请求数量、原材料、产能的最小值
   const maxByMaterials = Math.floor((company.rawMaterials || 0) / prodConfig.materialConsumption);
-  const actualProduction = Math.min(quantity, maxByMaterials, totalCapacity);
+  const actualProduction = Math.min(quantity, maxByMaterials, maxByCapacity);
   if (actualProduction <= 0) {
     return { success: false, error: '无法完成生产' };
   }
 
   // 实际消耗
   const actualMaterialUsed = actualProduction * prodConfig.materialConsumption;
-  const actualProcessingCost = ECONOMY_BALANCE.company.processingCostPerUnit * actualProduction;
+  const actualProcessingCost = getProcessingCost(company.productionType, actualProduction);
+  const actualCapacityUsed = getProductionCapacityUsage(company.productionType, actualProduction);
 
   room.gameState.players = room.gameState.players.map(p => {
     if (p.id !== playerId) return p;
@@ -1535,8 +1544,14 @@ function handleProduceGoods(room: GameRoom, playerId: string, quantity: number):
         rawMaterials: p.company!.rawMaterials - actualMaterialUsed,
         inventory: getTotalProductInventory(productInventory),
         productInventory,
-        productionUsedThisRound: p.company!.productionUsedThisRound + actualProduction,
+        productionUsedThisRound: (p.company!.productionUsedThisRound || 0) + actualCapacityUsed,
         costs: p.company!.costs + actualProcessingCost,
+        cashFlow: {
+          ...p.company!.cashFlow,
+          expenses: p.company!.cashFlow.expenses + actualProcessingCost,
+          productionCosts: p.company!.cashFlow.productionCosts + actualProcessingCost,
+          final: p.company!.cashFlow.final - actualProcessingCost,
+        },
         stats: {
           ...p.company!.stats,
           totalProduced: p.company!.stats.totalProduced + actualProduction,
@@ -1547,7 +1562,7 @@ function handleProduceGoods(room: GameRoom, playerId: string, quantity: number):
   });
   room.gameState.market.supplyDemand[company.productionType].supply += actualProduction;
 
-  console.log(`[ProduceGoods] player=${playerId}, requested=${quantity}, actual=${actualProduction}, capacity=${totalCapacity}, cash=${player.cash - actualProcessingCost}`);
+  console.log(`[ProduceGoods] player=${playerId}, requested=${quantity}, actual=${actualProduction}, capacity=${totalCapacity}, usedCapacity=${actualCapacityUsed}, cash=${player.cash - actualProcessingCost}`);
   roomManager.updateGameState(room.id, room.gameState);
   return { success: true };
 }
@@ -1576,8 +1591,7 @@ function handleFireEmployee(room: GameRoom, playerId: string, count: number): { 
       company: {
         ...p.company!,
         employees: p.company!.employees - fireCount,
-        // 解雇员工减少产能：每人 -25件/轮
-        productionCapacity: Math.max(0, p.company!.productionCapacity - 25 * fireCount),
+        productionCapacity: getCompanyCapacityUnits({ ...p.company!, employees: Math.max(0, p.company!.employees - fireCount) }),
       },
     };
   });
@@ -2220,20 +2234,17 @@ function settleRound(gameState: GameState): GameState {
 
       if (company.autoProduction.enabled && company.autoProduction.monthlyTarget > 0) {
         const prodConfig = PRODUCTION_CONFIGS[company.productionType];
-        const moraleFactor = 0.75 + company.morale / 200;
-        const productivityFactor = 1 + (market.productivityBonus ?? 0);
-        const capacity = Math.floor((company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity) * moraleFactor * productivityFactor);
+        const capacity = getEffectiveCapacityUnits(company, market.productivityBonus ?? 0);
+        const maxByCapacity = getMaxProductionByCapacity(capacity, 0, company.productionType);
         const maxByMaterials = Math.floor(company.rawMaterials / prodConfig.materialConsumption);
-        const actualProduction = Math.min(company.autoProduction.monthlyTarget, capacity, maxByMaterials);
+        const actualProduction = Math.min(company.autoProduction.monthlyTarget, maxByCapacity, maxByMaterials);
 
         if (actualProduction > 0) {
-          const productionCost = actualProduction * ECONOMY_BALANCE.company.processingCostPerUnit;
+          const productionCost = getProcessingCost(company.productionType, actualProduction);
           const materialUsed = actualProduction * prodConfig.materialConsumption;
           const sellingPrice = prodConfig.baseSellingPrice * (1 + (company.productQuality - 60) / 200);
           const sd = market.supplyDemand[company.productionType];
-          const demandSupplyRatio = sd.demand / Math.max(1, sd.supply);
-          const saleRatio = clamp(prodConfig.marketDemand * demandSupplyRatio * (0.7 + company.reputation / 200), 0.1, 1.3);
-          const sold = Math.min(actualProduction, Math.floor(actualProduction * saleRatio));
+          const sold = estimateProductSales(market, company, company.productionType, actualProduction, sellingPrice);
           monthlyProductionCosts = productionCost;
           monthlyRevenue = Math.round(sold * sellingPrice);
 

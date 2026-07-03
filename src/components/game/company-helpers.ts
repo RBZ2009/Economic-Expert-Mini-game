@@ -34,9 +34,18 @@ export function estimateProductSales(
 ): number {
   const prodConfig = PRODUCTION_CONFIGS[productType];
   const sd = market.supplyDemand[productType];
-  const demandSupplyRatio = sd.demand / Math.max(1, sd.supply);
+  const availableDemand = Math.max(0, sd.demand);
+  const supplyPressure = Math.max(0.45, Math.min(1.35, availableDemand / Math.max(1, sd.supply)));
   const qualityFactor = 0.8 + company.productQuality / 100;
   const reputationFactor = 0.75 + company.reputation / 160;
   const priceFactor = Math.pow(prodConfig.baseSellingPrice / Math.max(1, pricePerUnit), prodConfig.demandElasticity);
-  return Math.max(0, Math.min(quantity, Math.floor(quantity * prodConfig.marketDemand * demandSupplyRatio * qualityFactor * reputationFactor * priceFactor)));
+  const demandAtPrice = Math.floor(
+    availableDemand
+      * prodConfig.marketDemand
+      * supplyPressure
+      * qualityFactor
+      * reputationFactor
+      * priceFactor
+  );
+  return Math.max(0, Math.min(quantity, demandAtPrice));
 }

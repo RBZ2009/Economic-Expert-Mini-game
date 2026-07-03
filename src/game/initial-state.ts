@@ -30,7 +30,7 @@ function createInitialCompany(ownerId: string): Company {
     name: '创业公司',
     employees: 0,
     machines: 0,
-    rawMaterials: 50,
+    rawMaterials: 180,
     inventory: 0,
     productInventory: {
       daily_necessities: 0,

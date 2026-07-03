@@ -43,6 +43,15 @@ import {
 import { applyNewsEvent, pickNewsEvent } from '@/game/news';
 import { getEndTurnTutorialPrompt } from '@/game/education';
 import { getJobOffers, getWorkerCurrentJob, isQualifiedForJob } from '@/game/jobs';
+import { estimateProductSales } from '@/components/game/company-helpers';
+import {
+  getCompanyCapacityUnits,
+  getEffectiveCapacityUnits,
+  getMaterialPurchaseCost,
+  getMaxProductionByCapacity,
+  getProcessingCost,
+  getProductionCapacityUsage,
+} from '@/game/company-economics';
 
 // ==================== 类型定义 ====================
 
@@ -85,6 +94,7 @@ type GameAction =
   | { type: 'HIRE_EMPLOYEE'; payload: { playerId: string; count: number } }
   | { type: 'FIRE_EMPLOYEE'; payload: { playerId: string; count: number } }
   | { type: 'BUY_MACHINE'; payload: { playerId: string; machineType: string } }
+  | { type: 'BUY_MATERIALS'; payload: { playerId: string; quantity: number } }
   | { type: 'PRODUCE_GOODS'; payload: { playerId: string; quantity: number } }
   | { type: 'SELL_COMPANY_PRODUCT'; payload: { playerId: string; quantity: number; pricePerUnit: number; productType?: ProductionGoodType } }
   | { type: 'SET_PRODUCT_PRICE'; payload: { playerId: string; price: number } }
@@ -316,22 +326,6 @@ function getTotalProductInventory(productInventory: Record<ProductionGoodType, n
   return Object.values(productInventory).reduce((sum, value) => sum + value, 0);
 }
 
-function estimateProductSales(
-  market: Market,
-  company: Company,
-  productType: ProductionGoodType,
-  quantity: number,
-  pricePerUnit: number,
-): number {
-  const prodConfig = PRODUCTION_CONFIGS[productType];
-  const sd = market.supplyDemand[productType];
-  const demandSupplyRatio = sd.demand / Math.max(1, sd.supply);
-  const qualityFactor = 0.8 + company.productQuality / 100;
-  const reputationFactor = 0.75 + company.reputation / 160;
-  const priceFactor = Math.pow(prodConfig.baseSellingPrice / Math.max(1, pricePerUnit), prodConfig.demandElasticity);
-  return Math.max(0, Math.min(quantity, Math.floor(quantity * prodConfig.marketDemand * demandSupplyRatio * qualityFactor * reputationFactor * priceFactor)));
-}
-
 function calculateVictoryScores(players: Player[], market: Market): GameState['victoryScores'] {
   return Object.fromEntries(players.map(player => {
     const netWorth = calculateNetWorth(player);
@@ -366,7 +360,7 @@ const createInitialCompany = (ownerId: string): Company => ({
   name: '创业公司',
   employees: 0,
   machines: 0,
-  rawMaterials: 50,  // 初始原材料库存
+  rawMaterials: 180,  // 初始原材料库存
   inventory: 0,      // 初始产品库存
   productInventory: {
     daily_necessities: 0,
@@ -1532,7 +1526,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
             ...player.company,
             employees: player.company.employees + count,
             costs: player.company.costs + totalCost,
-            productionCapacity: (player.company.employees + count) * ECONOMY_BALANCE.company.employeeCapacity + player.company.machines * ECONOMY_BALANCE.company.machineCapacity,
+            productionCapacity: getCompanyCapacityUnits({ ...player.company, employees: player.company.employees + count }),
             morale: newMorale,
             cashFlow: {
               ...player.company.cashFlow,
@@ -1563,7 +1557,7 @@ function gameReducer(state: GameState, action: GameAction): GameState {
             ...player.company,
             employees: Math.max(0, player.company.employees - actualFire),
             costs: player.company.costs + severance,
-            productionCapacity: Math.max(0, (player.company.employees - actualFire) * ECONOMY_BALANCE.company.employeeCapacity + player.company.machines * ECONOMY_BALANCE.company.machineCapacity),
+            productionCapacity: getCompanyCapacityUnits({ ...player.company, employees: Math.max(0, player.company.employees - actualFire) }),
             morale: Math.max(0, player.company.morale - actualFire * 3),
             cashFlow: {
               ...player.company.cashFlow,
@@ -1602,12 +1596,47 @@ function gameReducer(state: GameState, action: GameAction): GameState {
           company: {
             ...player.company,
             machines: player.company.machines + 1,
-            productionCapacity: player.company.employees * ECONOMY_BALANCE.company.employeeCapacity + player.company.machines * ECONOMY_BALANCE.company.machineCapacity + config.capacityGain,
+            productionCapacity: getCompanyCapacityUnits({ ...player.company, machines: player.company.machines + 1 }),
             costs: player.company.costs + config.maintenanceCost,
             efficiency: Math.min(100, player.company.efficiency + config.efficiency),
             cashFlow: {
               ...player.company.cashFlow,
               expenses: player.company.cashFlow.expenses + config.price,
+            },
+          },
+        };
+      });
+
+      return { ...state, players: updatedPlayers };
+    }
+
+    case 'BUY_MATERIALS': {
+      const { playerId, quantity } = action.payload;
+      if (quantity <= 0) return state;
+
+      const updatedPlayers = state.players.map(player => {
+        if (player.id !== playerId) return player;
+        if (player.profession !== 'entrepreneur' || !player.company) return player;
+
+        const totalCost = getMaterialPurchaseCost(quantity, player.company);
+        if (player.cash < totalCost) return player;
+
+        return {
+          ...player,
+          cash: player.cash - totalCost,
+          company: {
+            ...player.company,
+            rawMaterials: (player.company.rawMaterials || 0) + quantity,
+            costs: player.company.costs + totalCost,
+            cashFlow: {
+              ...player.company.cashFlow,
+              expenses: player.company.cashFlow.expenses + totalCost,
+              productionCosts: player.company.cashFlow.productionCosts + totalCost,
+              final: player.company.cashFlow.final - totalCost,
+            },
+            stats: {
+              ...player.company.stats,
+              totalCosts: player.company.stats.totalCosts + totalCost,
             },
           },
         };
@@ -1626,44 +1655,52 @@ function gameReducer(state: GameState, action: GameAction): GameState {
         const company = player.company;
         
         // 计算剩余产能
-        const totalCapacity = company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity;
+        const totalCapacity = getCompanyCapacityUnits(company);
         const usedThisRound = company.productionUsedThisRound || 0;
-        const remainingCapacity = Math.max(0, totalCapacity - usedThisRound);
+        const maxByCapacity = getMaxProductionByCapacity(totalCapacity, usedThisRound, company.productionType);
         
         // 验证数量
         if (quantity <= 0) return player;
         
         // 检查剩余产能
-        if (quantity > remainingCapacity) return player;
+        if (quantity > maxByCapacity) return player;
         
         // 原材料限制
         const prodConfig = PRODUCTION_CONFIGS[company.productionType];
         const maxByMaterials = Math.floor(Math.max(0, company.rawMaterials || 0) / prodConfig.materialConsumption);
         if (quantity > maxByMaterials) return player;
         
-        const processingCost = ECONOMY_BALANCE.company.processingCostPerUnit * quantity;
+        const processingCost = getProcessingCost(company.productionType, quantity);
         if (player.cash < processingCost) return player;
         
         // 实际产出
-        const actualProduction = Math.min(quantity, maxByMaterials, remainingCapacity);
+        const actualProduction = Math.min(quantity, maxByMaterials, maxByCapacity);
         if (actualProduction <= 0) return player;
+        const actualProcessingCost = getProcessingCost(company.productionType, actualProduction);
+        const capacityUsed = getProductionCapacityUsage(company.productionType, actualProduction);
         const productInventory = getProductInventory(company);
         productInventory[company.productionType] += actualProduction;
         
         return {
           ...player,
-          cash: player.cash - processingCost,
+          cash: player.cash - actualProcessingCost,
           company: {
             ...company,
             rawMaterials: (company.rawMaterials || 0) - actualProduction * prodConfig.materialConsumption,
             inventory: getTotalProductInventory(productInventory),
             productInventory,
-            productionUsedThisRound: usedThisRound + actualProduction,
-            costs: company.costs + processingCost,
+            productionUsedThisRound: usedThisRound + capacityUsed,
+            costs: company.costs + actualProcessingCost,
+            cashFlow: {
+              ...company.cashFlow,
+              expenses: company.cashFlow.expenses + actualProcessingCost,
+              productionCosts: company.cashFlow.productionCosts + actualProcessingCost,
+              final: company.cashFlow.final - actualProcessingCost,
+            },
             stats: {
               ...company.stats,
               totalProduced: company.stats.totalProduced + actualProduction,
-              totalCosts: company.stats.totalCosts + processingCost,
+              totalCosts: company.stats.totalCosts + actualProcessingCost,
             },
           },
         };
@@ -2425,20 +2462,17 @@ function gameReducer(state: GameState, action: GameAction): GameState {
             const unitSellingPrice = prodConfig.baseSellingPrice * (1 + (company.productQuality - 60) / 200);
             
             // 计算实际可生产的数量（受产能和原材料限制）
-            const moraleFactor = 0.75 + company.morale / 200;
             const productivityFactor = 1 + (newMarket.productivityBonus ?? 0);
-            const totalCapacity = Math.floor((company.employees * ECONOMY_BALANCE.company.employeeCapacity + company.machines * ECONOMY_BALANCE.company.machineCapacity) * moraleFactor * productivityFactor);
-            const maxByCapacity = totalCapacity;
+            const totalCapacity = getEffectiveCapacityUnits(company, productivityFactor - 1);
+            const maxByCapacity = getMaxProductionByCapacity(totalCapacity, 0, company.productionType);
             const maxByMaterials = Math.max(0, Math.floor(company.rawMaterials / prodConfig.materialConsumption));
             const actualProduction = Math.min(autoProd.monthlyTarget, maxByCapacity, maxByMaterials);
             
             if (actualProduction > 0) {
-              const totalProductionCost = Math.round(actualProduction * ECONOMY_BALANCE.company.processingCostPerUnit);
+              const totalProductionCost = getProcessingCost(company.productionType, actualProduction);
               const totalMaterialUsed = actualProduction * prodConfig.materialConsumption;
               const sd = newMarket.supplyDemand[company.productionType];
-              const demandSupplyRatio = sd.demand / Math.max(1, sd.supply);
-              const saleRatio = clamp(prodConfig.marketDemand * demandSupplyRatio * (0.7 + company.reputation / 200), 0.1, 1.3);
-              const sold = Math.min(actualProduction, Math.floor(actualProduction * saleRatio));
+              const sold = estimateProductSales(newMarket, company, company.productionType, actualProduction, unitSellingPrice);
               const totalRevenue = Math.round(sold * unitSellingPrice);
               
               monthlyProductionCosts += totalProductionCost;
