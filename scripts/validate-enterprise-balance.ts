@@ -1,4 +1,4 @@
-import { estimateProductSales, findBestSaleOption } from '../src/components/game/company-helpers';
+import { estimateProductSales, findBestSaleOption, getReputationDemandFactor } from '../src/components/game/company-helpers';
 import {
   getCompanyCapacityUnits,
   getEstimatedUnitVariableCost,
@@ -129,6 +129,33 @@ function assertMaterialScaleCurve(): void {
   }
 }
 
+function assertReputationDemandCurve(): void {
+  const low = getReputationDemandFactor(0);
+  const mid = getReputationDemandFactor(50);
+  const high = getReputationDemandFactor(100);
+
+  if (Math.abs(high - 2) > 0.02) {
+    throw new Error(`Reputation curve validation failed: 声誉 100 的需求系数应约为 2.0，当前为 ${high.toFixed(2)}`);
+  }
+  if (mid <= low || high <= mid) {
+    throw new Error(`Reputation curve validation failed: 需求系数未随声誉单调提升（0=${low.toFixed(2)}, 50=${mid.toFixed(2)}, 100=${high.toFixed(2)}）`);
+  }
+
+  const state = createInitialGameState([
+    { id: 'entrepreneur', name: '企业家', color: '#16a34a', profession: 'entrepreneur' },
+  ], 'professional');
+  const lowRepCompany = { ...createCompany('food', 6, 3), reputation: 0 };
+  const highRepCompany = { ...lowRepCompany, reputation: 100 };
+  const quantity = 9000;
+  const marketPrice = state.market.goods.food.currentPrice || PRODUCTION_CONFIGS.food.baseSellingPrice;
+  const lowSales = estimateProductSales(state.market, lowRepCompany, 'food', quantity, marketPrice);
+  const highSales = estimateProductSales(state.market, highRepCompany, 'food', quantity, marketPrice);
+
+  if (highSales <= lowSales * 2.1) {
+    throw new Error(`Reputation curve validation failed: 满声誉销量 ${highSales} 未明显高于低声誉 ${lowSales}`);
+  }
+}
+
 function assertBadPricingIsPunished(): void {
   const state = createInitialGameState([
     { id: 'entrepreneur', name: '企业家', color: '#16a34a', profession: 'entrepreneur' },
@@ -156,5 +183,6 @@ function assertBadPricingIsPunished(): void {
 
 assertEmployeeCapacityValue();
 assertMaterialScaleCurve();
+assertReputationDemandCurve();
 assertBadPricingIsPunished();
-console.log('Enterprise balance passed: employee capacity covers wages, materials show scale curve, and bad high-price strategy is punished.');
+console.log('Enterprise balance passed: employee capacity covers wages, materials show scale curve, reputation can reach 2.0x demand, and bad high-price strategy is punished.');

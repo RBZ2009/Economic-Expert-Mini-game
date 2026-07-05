@@ -1231,7 +1231,7 @@ function EntrepreneurActions() {
                     )}
                   </div>
                   <div className="text-xs text-muted-foreground space-y-0.5">
-                    <div>变动成本: 约¥{formatCurrency(getEstimatedUnitVariableCost(type as ProductionGoodType, company))}/单位</div>
+                    <div>变动成本: 约¥{formatCurrency(getEstimatedUnitVariableCost(type as ProductionGoodType, company, 100, state.market))}/单位</div>
                     <div>售价: ¥{config.baseSellingPrice}/单位</div>
                     <div>产能: {config.capacityCost} 点/件</div>
                     <div className="text-muted-foreground/70">{config.description}</div>
@@ -1278,22 +1278,35 @@ function EntrepreneurActions() {
             
             {/* 预估利润计算 */}
             <div className="p-2 bg-green-50 dark:bg-green-950/30 rounded">
-              <div className="text-xs space-y-1">
-                <div className="flex justify-between font-medium">
-                  <span>预估单位利润:</span>
-                  <span className="text-green-600">
-                    ¥{formatCurrency(PRODUCTION_CONFIGS[company.productionType].baseSellingPrice * (1 + (company.productQuality - 60) / 200) - PRODUCTION_CONFIGS[company.productionType].baseProductionCost)}
-                  </span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>售价:</span>
-                  <span>¥{PRODUCTION_CONFIGS[company.productionType].baseSellingPrice}</span>
-                </div>
-                <div className="flex justify-between text-muted-foreground">
-                  <span>原料采购价:</span>
-                  <span>约 ¥{formatCurrency(getMaterialUnitPrice(100, company))}/单位</span>
-                </div>
-              </div>
+              {(() => {
+                const config = PRODUCTION_CONFIGS[company.productionType];
+                const marketPrice = state.market.goods[company.productionType].currentPrice || config.baseSellingPrice;
+                const unitVariableCost = getEstimatedUnitVariableCost(company.productionType, company, 100, state.market);
+                const unitMargin = Math.round((marketPrice - unitVariableCost) * 100) / 100;
+
+                return (
+                  <div className="text-xs space-y-1">
+                    <div className="flex justify-between font-medium">
+                      <span>按当前市场价的单位毛利:</span>
+                      <span className={unitMargin >= 0 ? 'text-green-600' : 'text-red-600'}>
+                        {unitMargin >= 0 ? '+' : ''}¥{formatCurrency(unitMargin)}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-muted-foreground">
+                      <span>当前市场价:</span>
+                      <span>¥{formatCurrency(marketPrice)}</span>
+                    </div>
+                    <div className="flex justify-between text-muted-foreground">
+                      <span>动态变动成本:</span>
+                      <span>约 ¥{formatCurrency(unitVariableCost)}</span>
+                    </div>
+                    <div className="flex justify-between text-muted-foreground">
+                      <span>原料采购价:</span>
+                      <span>约 ¥{formatCurrency(getMaterialUnitPrice(100, company, state.market))}/单位</span>
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
             
             <p className="text-xs text-muted-foreground mt-2">
@@ -1346,47 +1359,56 @@ function EntrepreneurActions() {
               </div>
               
               {company.autoProduction.enabled && company.autoProduction.monthlyTarget > 0 && (
-                <div className="p-2 bg-muted/30 rounded text-xs">
-                  <div className="flex justify-between">
-                    <span>预估成本（含原材料）:</span>
-                    <span className="font-medium text-red-600">
-                      -¥{formatCurrency(
-                        company.autoProduction.monthlyTarget * 
-                        getEstimatedUnitVariableCost(company.productionType, company, company.autoProduction.monthlyTarget)
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex justify-between mt-1">
-                    <span>预计收入:</span>
-                    <span className="font-medium text-green-600">
-                      +¥{formatCurrency(company.autoProduction.monthlyTarget * PRODUCTION_CONFIGS[company.productionType].baseSellingPrice)}
-                    </span>
-                  </div>
-                  <div className="flex justify-between mt-1">
-                    <span>预估利润:</span>
-                    <span className="font-medium text-green-600">
-	                      ¥{formatCurrency(
-	                        company.autoProduction.monthlyTarget * PRODUCTION_CONFIGS[company.productionType].baseSellingPrice -
-	                        company.autoProduction.monthlyTarget * 
-	                        getEstimatedUnitVariableCost(company.productionType, company, company.autoProduction.monthlyTarget)
-	                      )}
-                    </span>
-                  </div>
-                  <div className="flex justify-between mt-1">
-                    <span>最大可生产:</span>
-                    <span className="font-medium">
-                      {Math.min(
-                        company.autoProduction.monthlyTarget, 
-                        getMaxProductionByCapacity(getCompanyCapacityUnits(company), 0, company.productionType), 
-                        Math.floor(company.rawMaterials / PRODUCTION_CONFIGS[company.productionType].materialConsumption)
-                      )}件
-                    </span>
-                  </div>
-                </div>
+                (() => {
+                  const config = PRODUCTION_CONFIGS[company.productionType];
+                  const target = company.autoProduction.monthlyTarget;
+                  const maxByCapacity = getMaxProductionByCapacity(getCompanyCapacityUnits(company), 0, company.productionType);
+                  const maxByMaterials = Math.floor(company.rawMaterials / config.materialConsumption);
+                  const actualProduction = Math.max(0, Math.min(target, maxByCapacity, maxByMaterials));
+                  const unitCost = getEstimatedUnitVariableCost(company.productionType, company, Math.max(100, actualProduction), state.market);
+                  const estimatedCost = Math.round(actualProduction * unitCost);
+                  const autoSalePrice = Math.round(config.baseSellingPrice * (1 + (company.productQuality - 60) / 200));
+                  const estimatedSold = estimateProductSales(state.market, company, company.productionType, actualProduction, autoSalePrice);
+                  const estimatedRevenue = estimatedSold * autoSalePrice;
+                  const estimatedProfit = estimatedRevenue - estimatedCost;
+
+                  return (
+                    <div className="p-2 bg-muted/30 rounded text-xs">
+                      <div className="flex justify-between">
+                        <span>预估成本:</span>
+                        <span className="font-medium text-red-600">
+                          -¥{formatCurrency(estimatedCost)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between mt-1">
+                        <span>预计收入:</span>
+                        <span className="font-medium text-green-600">
+                          +¥{formatCurrency(estimatedRevenue)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between mt-1">
+                        <span>预估利润:</span>
+                        <span className={`font-medium ${estimatedProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                          {estimatedProfit >= 0 ? '+' : ''}¥{formatCurrency(estimatedProfit)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between mt-1">
+                        <span>自动售价/成交:</span>
+                        <span className="font-medium">
+                          ¥{formatCurrency(autoSalePrice)} / {estimatedSold}件
+                        </span>
+                      </div>
+                      <div className="flex justify-between mt-1">
+                        <span>最大可生产:</span>
+                        <span className="font-medium">{actualProduction}件</span>
+                      </div>
+                    </div>
+                  );
+                })()
               )}
             </div>
             <p className="text-xs text-muted-foreground mt-2">
-              💡 成本随产量递增，生产越多单价成本越高
+              💡 适度扩产会摊薄单价成本，但过度扩张后，土地、物流和供应链压力会让单位成本重新抬升
             </p>
           </div>
 
@@ -1394,7 +1416,7 @@ function EntrepreneurActions() {
             <h4 className="font-medium mb-3">📦 原材料采购</h4>
             <div className="grid grid-cols-2 gap-2">
               {[50, 200].map(quantity => {
-                const totalCost = getMaterialPurchaseCost(quantity, company);
+                const totalCost = getMaterialPurchaseCost(quantity, company, state.market);
                 return (
                   <Button
                     key={quantity}
@@ -1409,7 +1431,7 @@ function EntrepreneurActions() {
               })}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              当前约 ¥{formatCurrency(getMaterialUnitPrice(100, company))}/单位；批量采购和适度规模会降低单价，过度扩张会推高土地与物流成本。
+              当前约 ¥{formatCurrency(getMaterialUnitPrice(100, company, state.market))}/单位；批量采购和适度规模会降低单价，过度扩张会推高土地与物流成本。
             </p>
           </div>
 
@@ -1678,8 +1700,16 @@ function EntrepreneurActions() {
             </div>
             <div className="mt-2 text-xs text-muted-foreground space-y-1">
               <div className="flex justify-between">
-                <span>库存潜在销售额:</span>
-                <span className="text-green-600">+¥{formatCurrency((company.inventory || 0) * PRODUCTION_CONFIGS[company.productionType].baseSellingPrice)}</span>
+                <span>库存按最优售价估算税后收入:</span>
+                <span className="text-green-600">
+                  +¥{formatCurrency(
+                    productionGoodTypes.reduce((total, type) => {
+                      const stock = productInventory[type] || 0;
+                      if (stock <= 0) return total;
+                      return total + findBestSaleOption(state.market, company, type, stock).netRevenue;
+                    }, 0)
+                  )}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span>工资支出:</span>
@@ -1741,7 +1771,7 @@ function EntrepreneurActions() {
           <div className="p-3 border rounded-lg">
             <h4 className="font-medium mb-2">📢 市场推广</h4>
             <p className="text-xs text-muted-foreground mb-2">
-              推广增加市场份额和企业声誉
+              推广会提高企业声誉、市场份额，并增强消费者对较高定价的接受度
             </p>
             <div className="flex flex-wrap gap-2">
               <Button 

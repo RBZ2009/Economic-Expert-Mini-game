@@ -1356,9 +1356,11 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
     const actualRoundGrossRevenue = currentRoundSales.reduce((total, sale) => total + (sale?.grossRevenue ?? 0), 0);
     const actualRoundNetRevenue = currentRoundSales.reduce((total, sale) => total + (sale?.netRevenue ?? 0), 0);
     const actualRoundSold = currentRoundSales.reduce((total, sale) => total + (sale?.sold ?? 0), 0);
-    const potentialInventoryRevenue = productionGoodTypes.reduce((total, type) => (
-      total + (productInventory[type] || 0) * PRODUCTION_CONFIGS[type].baseSellingPrice
-    ), 0);
+    const potentialInventoryRevenue = productionGoodTypes.reduce((total, type) => {
+      const stock = productInventory[type] || 0;
+      if (stock <= 0) return total;
+      return total + findBestSaleOption(gameState.market, company, type, stock).netRevenue;
+    }, 0);
     const estimatedOperatingCost =
       company.employees * (company.productionCost || ECONOMY_BALANCE.company.wagePerEmployee) +
       company.machines * MACHINE_CONFIGS.basic.maintenanceCost;
@@ -1472,20 +1474,20 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           </h5>
           <div className="mb-2 grid grid-cols-2 gap-2 text-xs">
             <div className="rounded bg-muted/40 p-2">
-              <div className="text-muted-foreground">市场参考价</div>
-              <div className="font-medium">¥{formatCurrency(gameState.market.priceAnchors[company.productionType].referencePrice)}</div>
+              <div className="text-muted-foreground">原料动态单价</div>
+              <div className="font-medium">¥{formatCurrency(getMaterialUnitPrice(100, company, gameState.market))}</div>
             </div>
             <div className="rounded bg-muted/40 p-2">
-              <div className="text-muted-foreground">库存/短缺</div>
+              <div className="text-muted-foreground">上游指数/短缺</div>
               <div className="font-medium">
-                {formatPercent(gameState.market.inventoryPressure[company.productionType], 1)}% / {formatPercent(gameState.market.shortageIndex[company.productionType], 1)}%
+                {Math.round(gameState.market.supplyChain.layers.basicMaterials.priceIndex)} / {formatPercent(gameState.market.supplyChain.layers.basicMaterials.shortage, 1)}%
               </div>
             </div>
           </div>
           
           <div className="flex gap-2">
             {[50, 200].map(quantity => {
-              const totalCost = getMaterialPurchaseCost(quantity, company);
+              const totalCost = getMaterialPurchaseCost(quantity, company, gameState.market);
               return (
                 <Button 
                   key={quantity}
@@ -1501,7 +1503,7 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           </div>
           
           <div className="mt-2 text-xs text-muted-foreground">
-            当前约 ¥{formatCurrency(getMaterialUnitPrice(100, company))}/单位；批量采购和适度规模会降低单价，过度扩张会推高土地与物流成本。当前持有: {company.rawMaterials || 0} 单位
+            当前约 ¥{formatCurrency(getMaterialUnitPrice(100, company, gameState.market))}/单位；批量采购和适度规模会降低单价，过度扩张会推高土地与物流成本。当前持有: {company.rawMaterials || 0} 单位
           </div>
         </div>
 
@@ -1568,7 +1570,7 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
                     id: type,
                     icon: config.icon,
                     name: config.name,
-                    cost: Math.round(getEstimatedUnitVariableCost(type, company)),
+                    cost: Math.round(getEstimatedUnitVariableCost(type, company, 100, gameState.market)),
                   };
                 }),
               ].map(type => (
@@ -1809,7 +1811,7 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           </div>
           
           <div className="mt-2 text-xs text-muted-foreground">
-            声誉影响产品销量和售价 | 声誉满 100 后销量翻倍
+            声誉会提升销量并增强高价承受度 | 声誉满 100 时需求系数最高可到 2.0x
           </div>
         </div>
 
@@ -1819,7 +1821,7 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
           
           <div className="text-xs space-y-1">
             <div className="flex justify-between">
-              <span>{currentRoundSales.length > 0 ? '本轮实际税后收入:' : '库存潜在收入:'}</span>
+              <span>{currentRoundSales.length > 0 ? '本轮实际税后收入:' : '库存按最优售价估算税后收入:'}</span>
               <span className="text-green-600">+¥{formatCurrency(profitBasisRevenue)}</span>
             </div>
             {currentRoundSales.length > 0 && (

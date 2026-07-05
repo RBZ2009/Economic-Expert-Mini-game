@@ -26,6 +26,14 @@ export function getProductInventory(company: Company): Record<ProductionGoodType
   };
 }
 
+export function getReputationDemandFactor(reputation: number): number {
+  const normalized = Math.max(0, Math.min(100, reputation)) / 100;
+  if (normalized <= 0.5) {
+    return 0.72 + normalized * 1.16;
+  }
+  return 1.3 + Math.pow((normalized - 0.5) / 0.5, 1.08) * 0.7;
+}
+
 export function estimateProductSales(
   market: Market,
   company: Company,
@@ -38,7 +46,7 @@ export function estimateProductSales(
   const availableDemand = Math.max(0, sd.demand);
   const supplyPressure = Math.max(0.55, Math.min(1.45, availableDemand / Math.max(1, sd.supply)));
   const qualityFactor = 0.84 + company.productQuality / 120;
-  const reputationFactor = 0.8 + company.reputation / 180;
+  const reputationFactor = getReputationDemandFactor(company.reputation);
   const visibleMarketPrice = market.goods[productType].currentPrice || prodConfig.baseSellingPrice;
   const marketPrice = visibleMarketPrice >= prodConfig.baseSellingPrice * 0.85 && visibleMarketPrice <= prodConfig.baseSellingPrice * 3.2
     ? visibleMarketPrice
