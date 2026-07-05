@@ -195,6 +195,14 @@ export function createInitialPlayer(
       reputation: 60,
       approvalRating: 60,
       policyHistory: [],
+      residentSupport: 60,
+      enterpriseSupport: 60,
+      fiscalHealth: 60,
+      stabilitySupport: 60,
+      inflationSatisfaction: 60,
+      budgetSpace: 60,
+      executionEfficiency: 60,
+      removalRisk: 20,
     };
   }
 
@@ -254,10 +262,10 @@ function createInitialHouseholds(): HouseholdSegment[] {
 
 function createInitialNpcFirms(): NpcFirm[] {
   return [
-    { id: 'npc_food', industry: 'food', employees: 36, capacity: 1100, wageOffer: 5600, financialHealth: 65, plannedSupply: 980, pricingPower: 0.12 },
-    { id: 'npc_daily', industry: 'daily_necessities', employees: 34, capacity: 980, wageOffer: 5400, financialHealth: 62, plannedSupply: 960, pricingPower: 0.1 },
-    { id: 'npc_entertainment', industry: 'entertainment', employees: 22, capacity: 520, wageOffer: 6800, financialHealth: 58, plannedSupply: 540, pricingPower: 0.18 },
-    { id: 'npc_luxury', industry: 'luxury', employees: 12, capacity: 220, wageOffer: 8800, financialHealth: 61, plannedSupply: 240, pricingPower: 0.26 },
+    { id: 'npc_food', industry: 'food', employees: 36, capacity: 1100, wageOffer: 5600, financialHealth: 65, plannedSupply: 980, pricingPower: 0.12, marketShare: 32, brand: 48, quality: 54, deliveryReliability: 72, costControl: 64, status: 'active' },
+    { id: 'npc_daily', industry: 'daily_necessities', employees: 34, capacity: 980, wageOffer: 5400, financialHealth: 62, plannedSupply: 960, pricingPower: 0.1, marketShare: 30, brand: 52, quality: 56, deliveryReliability: 70, costControl: 66, status: 'active' },
+    { id: 'npc_entertainment', industry: 'entertainment', employees: 22, capacity: 520, wageOffer: 6800, financialHealth: 58, plannedSupply: 540, pricingPower: 0.18, marketShare: 22, brand: 58, quality: 62, deliveryReliability: 60, costControl: 55, status: 'active' },
+    { id: 'npc_luxury', industry: 'luxury', employees: 12, capacity: 220, wageOffer: 8800, financialHealth: 61, plannedSupply: 240, pricingPower: 0.26, marketShare: 16, brand: 70, quality: 74, deliveryReliability: 56, costControl: 48, status: 'active' },
   ];
 }
 
@@ -294,6 +302,27 @@ export function createInitialGameState(players: InitialRoomPlayer[], gameMode: G
         defaultRate: 0.03,
         lendingSentiment: 0.58,
         mortgageApprovalRate: 0.68,
+        consumerApprovalRate: 0.62,
+        businessApprovalRate: 0.58,
+        collateralHaircut: 0.28,
+        riskPremium: 0.018,
+        badDebtPressure: 0.12,
+      },
+      supplyChain: {
+        layers: {
+          basicMaterials: { priceIndex: 100, availability: 0.88, shortage: 0.12, costShock: 0 },
+          intermediateGoods: { priceIndex: 100, availability: 0.86, shortage: 0.14, costShock: 0 },
+          packagingLogistics: { priceIndex: 100, availability: 0.9, shortage: 0.1, costShock: 0 },
+          energy: { priceIndex: 100, availability: 0.9, shortage: 0.1, costShock: 0 },
+        },
+        industryExposure: {
+          food: { basicMaterials: 0.36, intermediateGoods: 0.08, packagingLogistics: 0.4, energy: 0.16 },
+          daily_necessities: { basicMaterials: 0.42, intermediateGoods: 0.28, packagingLogistics: 0.22, energy: 0.08 },
+          entertainment: { basicMaterials: 0.16, intermediateGoods: 0.42, packagingLogistics: 0.12, energy: 0.3 },
+          luxury: { basicMaterials: 0.18, intermediateGoods: 0.36, packagingLogistics: 0.1, energy: 0.36 },
+          public_service: { basicMaterials: 0.08, intermediateGoods: 0.2, packagingLogistics: 0.32, energy: 0.4 },
+          finance: { basicMaterials: 0.04, intermediateGoods: 0.12, packagingLogistics: 0.14, energy: 0.7 },
+        },
       },
       macroState: {
         consumerConfidence: 60,
@@ -303,6 +332,13 @@ export function createInitialGameState(players: InitialRoomPlayer[], gameMode: G
         unemploymentPressure: 0.3,
         inflationExpectation: 0.03,
         socialMobilityIndex: 55,
+      },
+      externalSector: {
+        importCostIndex: 100,
+        exportDemandIndex: 100,
+        logisticsStress: 1,
+        energyPriceIndex: 100,
+        tradeBalance: 0,
       },
       priceAnchors: {
         food: { referencePrice: INITIAL_GOODS.food.basePrice, lastClearingPrice: INITIAL_GOODS.food.currentPrice, inventoryPressure: 0, shortageIndex: 0 },

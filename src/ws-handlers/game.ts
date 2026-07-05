@@ -7,8 +7,20 @@ import { roomManager, GameRoom } from '@/lib/room-manager';
 import { validateGameAction, validatePlayerProfession } from '@/game/actions';
 import { applyMultiplayerGameAction, MultiplayerActionHandlers } from '@/game/engine';
 import { createInitialGameState, createInitialPlayer } from '@/game/initial-state';
-import { applyNewsEvent, pickNewsEvent } from '@/game/news';
+import { applyLingeringNewsPressure, applyNewsEvent, pickNewsEvent } from '@/game/news';
 import { getJobOffers, getWorkerCurrentJob, isQualifiedForJob } from '@/game/jobs';
+import {
+  buildWageNegotiationContext,
+  FORCED_REST_DURATION,
+  FORCED_REST_RECOVERY_HEALTH,
+  FORCED_REST_TRIGGER,
+  getActionBlockReasonForPlayer,
+  getDefaultWorkerAbilities,
+  getForcedRestTrigger,
+  getWageNegotiationOutcome,
+  getWageRaiseMultiplier,
+  WORK_HEALTH_THRESHOLD,
+} from '@/game/labor';
 import { estimateProductSales, findBestSaleOption } from '@/components/game/company-helpers';
 import {
   getCompanyCapacityUnits,
@@ -21,15 +33,29 @@ import {
   getMaxProductionByCapacity,
   getProcessingCost,
   getProductionCapacityUsage,
+  getSupplyChainOverheadCost,
   updateCompanyFinanceSnapshot,
 } from '@/game/company-economics';
 import {
   applyDemandMultiplier,
+  applyPolicyEffectsToMarket,
   applyPolicyTransmission,
+  calculateAssetReturnMultiplier,
   calculateHouseholdDemandBySegment,
+  describePolicyEvaluation,
+  describeRoundCausalChain,
+  describePolicyTransmission,
+  deriveCreditConditions,
+  deriveEconomicCycle,
+  deriveExternalSector,
+  deriveGovernmentFeedback,
   deriveMacroState,
+  deriveSupplyChainState,
+  evaluateLoanApplication,
   getBaselineMarketDemand,
+  getGovernmentPolicyBudgetLimit,
   getNpcSupplyContribution,
+  recalculatePlayerMarketShare,
   updateHouseholdsForMacro,
   updateMarketAnchors,
   updateNpcFirmsForMacro,
@@ -53,7 +79,6 @@ import {
   PRODUCTION_CONFIGS,
   HOUSING_CONFIGS,
   MACHINE_CONFIGS,
-  CYCLE_MULTIPLIERS,
   POLICY_CONFIGS,
   PolicyType,
   calculateSocialStability,
@@ -70,37 +95,13 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-const WORK_HEALTH_THRESHOLD = 25;
-const FORCED_REST_TRIGGER = 10;
-const FORCED_REST_RECOVERY_HEALTH = 30;
-const FORCED_REST_DURATION = 2;
-
-function getForcedRestTrigger(player: Player): number {
-  return player.health < FORCED_REST_TRIGGER && (player.workState.forcedRestRounds ?? 0) <= 0
-    ? FORCED_REST_DURATION
-    : player.workState.forcedRestRounds ?? 0;
-}
-
-function getActionBlockReasonForPlayer(player: Player): string | null {
-  const forcedRestRounds = getForcedRestTrigger(player);
-  return forcedRestRounds > 0 ? `健康值过低，需强制休息 ${forcedRestRounds} 轮` : null;
-}
-
 function applyPendingPoliciesForRound(gameState: GameState, market: GameState['market'], round: number): { market: GameState['market']; appliedNews: RandomEvent | null; remainingPolicies: GameState['pendingPolicies'] } {
   const duePolicies = gameState.pendingPolicies.filter(policy => policy.effectiveRound <= round);
   const remainingPolicies = gameState.pendingPolicies.filter(policy => policy.effectiveRound > round);
   if (duePolicies.length === 0) return { market, appliedNews: null, remainingPolicies };
 
   const nextMarket = { ...market };
-  for (const pending of duePolicies) {
-    const policy = POLICY_CONFIGS[pending.policyType];
-    if (policy.effect.socialStability) nextMarket.socialStability = clamp(nextMarket.socialStability + policy.effect.socialStability, 0, 100);
-    if (policy.effect.inflation) nextMarket.inflationRate = clamp(nextMarket.inflationRate + policy.effect.inflation, -0.1, 0.3);
-    if (policy.effect.employment) nextMarket.employmentRate = clamp(nextMarket.employmentRate + policy.effect.employment, 0, 100);
-    if (pending.policyType === 'infrastructure') {
-      nextMarket.productivityBonus = Math.min(0.25, (nextMarket.productivityBonus ?? 0) + policy.cost / 200000);
-    }
-  }
+  const marketAfterPolicies = applyPolicyEffectsToMarket(nextMarket, duePolicies.map(policy => policy.policyType));
 
   const firstPolicy = duePolicies[0];
   const appliedNews: RandomEvent = {
@@ -110,7 +111,7 @@ function applyPendingPoliciesForRound(gameState: GameState, market: GameState['m
     icon: '🏛️',
     description: firstPolicy.explanation,
     story: '政府政策通常不会立刻改变经济，而是经过公告、执行和市场反应后逐步生效。',
-    explanation: duePolicies.map(policy => `${policy.policyName}：${policy.explanation}`).join('；'),
+    explanation: `${duePolicies.map(policy => `${policy.policyName}：${policy.explanation}`).join('；')}。传导链：${describePolicyTransmission(marketAfterPolicies, duePolicies.map(policy => policy.policyType))} 政策评价：${describePolicyEvaluation(marketAfterPolicies, duePolicies.map(policy => policy.policyType))}`,
     effects: {
       inflation: duePolicies.reduce((sum, pending) => sum + (POLICY_CONFIGS[pending.policyType].effect.inflation ?? 0), 0),
       employment: duePolicies.reduce((sum, pending) => sum + (POLICY_CONFIGS[pending.policyType].effect.employment ?? 0), 0),
@@ -122,7 +123,7 @@ function applyPendingPoliciesForRound(gameState: GameState, market: GameState['m
     warning: '这条新闻来自政府上一轮提交的政策说明。',
   };
 
-  return { market: nextMarket, appliedNews, remainingPolicies };
+  return { market: marketAfterPolicies, appliedNews, remainingPolicies };
 }
 
 function getBankRates(state: GameState) {
@@ -192,67 +193,6 @@ function calculatePortfolioRisk(player: Player): number {
   return clamp(weightedRisk + concentrationPenalty, 0, 2);
 }
 
-function applyLingeringEventPressure(market: GameState['market'], events: RandomEvent[]): void {
-  events.forEach(event => {
-    if ((event.remainingDuration ?? event.duration ?? 0) <= 0) return;
-    switch (event.type as string) {
-      case 'inflation':
-      case 'inflation_surge':
-        market.inflationRate = clamp(market.inflationRate + 0.01, -0.1, 0.3);
-        market.socialStability = clamp(market.socialStability - 1, 0, 100);
-        break;
-      case 'stock_crash':
-      case 'economic_crisis':
-        market.stockMarket.volatility = clamp(market.stockMarket.volatility + 0.03, 0.03, 1);
-        market.employmentRate = clamp(market.employmentRate - 1.5, 30, 100);
-        break;
-      case 'health_epidemic':
-      case 'natural_disaster':
-        market.employmentRate = clamp(market.employmentRate - 1, 30, 100);
-        market.inflationRate = clamp(market.inflationRate + 0.005, -0.1, 0.3);
-        break;
-      case 'social_unrest':
-        market.socialStability = clamp(market.socialStability - 1.5, 0, 100);
-        break;
-      default:
-        break;
-    }
-  });
-}
-
-function recalculateMarketShare(players: Player[], monthlySales: Record<string, { type: GoodType; sold: number }>): Player[] {
-  const totalByType = Object.values(monthlySales).reduce((acc, sale) => {
-    acc[sale.type] = (acc[sale.type] ?? 0) + sale.sold;
-    return acc;
-  }, {} as Partial<Record<GoodType, number>>);
-
-  return players.map(player => {
-    if (!player.company) return player;
-    const sale = monthlySales[player.id];
-    const totalSold = sale ? totalByType[sale.type] ?? 0 : 0;
-    const salesShare = totalSold > 0 ? (sale.sold / totalSold) * 100 : player.company.marketShare * 0.92;
-    const competitionScore = clamp(
-      14
-      + player.company.productQuality * 0.35
-      + player.company.reputation * 0.24
-      + player.company.machines * 0.9
-      + player.company.employees * 0.15
-      - player.company.inventory * 0.08
-      + Math.max(0, player.company.cashFlow.final / 10000),
-      5,
-      90,
-    );
-    const currentShare = salesShare * 0.68 + competitionScore * 0.32;
-    return {
-      ...player,
-      company: {
-        ...player.company,
-        marketShare: clamp(currentShare * 0.85 + player.company.marketShare * 0.15, 0, 100),
-      },
-    };
-  });
-}
-
 function emptyProductInventory(): Record<ProductionGoodType, number> {
   return {
     daily_necessities: 0,
@@ -309,10 +249,41 @@ interface RandomEventConfig {
   name: string;
   description: string;
   icon: string;
+  story?: string;
+  explanation?: string;
   duration?: number;
   warning?: string;
   effects?: RandomEvent['effects'];
+  transmissionChannels?: RandomEvent['transmissionChannels'];
   effect: (state: GameState) => GameState;
+}
+
+function inferTransmissionChannels(effects?: RandomEvent['effects']): RandomEvent['transmissionChannels'] {
+  const channels = new Set<NonNullable<RandomEvent['transmissionChannels']>[number]>();
+  if (!effects) return [];
+  if (effects.allIncomes || effects.employment || effects.demandMultiplier) channels.add('household_income');
+  if (effects.specificGoodPrice || effects.inflation) channels.add('enterprise_cost');
+  if (effects.creditTightness || effects.stockMarket) channels.add('credit');
+  if (effects.externalSector?.exportDemandIndex || effects.externalSector?.tradeBalance) channels.add('external_demand');
+  if (effects.externalSector?.logisticsStress || effects.externalSector?.energyPriceIndex) channels.add('logistics');
+  if (effects.socialStability || effects.cycleShift) channels.add('policy_expectation');
+  return Array.from(channels);
+}
+
+function describeRandomEventEffects(event: RandomEventConfig): string {
+  const effects = event.effects;
+  if (!effects) return event.description;
+  const fragments: string[] = [];
+  if (effects.inflation) fragments.push(`通胀${effects.inflation > 0 ? '上升' : '下降'}`);
+  if (effects.employment) fragments.push(`就业${effects.employment > 0 ? '改善' : '承压'}`);
+  if (effects.socialStability) fragments.push(`社会稳定${effects.socialStability > 0 ? '改善' : '下降'}`);
+  if (effects.stockMarket) fragments.push(`金融市场${effects.stockMarket.indexChange > 0 ? '走强' : '承压'}`);
+  if (effects.creditTightness) fragments.push('银行会根据风险重新评估贷款');
+  if (effects.externalSector) fragments.push('外部需求、进口成本或物流条件发生变化');
+  if (effects.demandMultiplier) fragments.push('不同商品需求出现分化');
+  return fragments.length > 0
+    ? `${event.description} 传导结果：${fragments.join('，')}。`
+    : event.description;
 }
 
 const RANDOM_EVENTS: RandomEventConfig[] = [
@@ -524,11 +495,14 @@ function createRandomEventMessage(event: RandomEventConfig): RandomEvent {
     name: event.name,
     description: event.description,
     icon: event.icon,
+    story: event.story ?? '随机事件会通过居民收入、企业成本、信贷条件、外部需求或市场预期影响下一轮经济。',
+    explanation: event.explanation ?? describeRandomEventEffects(event),
     duration: event.duration ?? 1,
     remainingDuration: event.duration ?? 1,
     warning: event.warning,
     effects: event.effects ?? {},
     probability: 0.1,
+    transmissionChannels: event.transmissionChannels ?? inferTransmissionChannels(event.effects),
   };
 }
 
@@ -612,7 +586,7 @@ function handleWork(room: GameRoom, playerId: string): { success: boolean; error
   const professionConfig = PROFESSION_CONFIGS[player.profession];
 
   const currentJob = player.profession === 'worker'
-    ? getWorkerCurrentJob(player, room.gameState.players)
+    ? getWorkerCurrentJob(player, room.gameState.players, room.gameState.market)
     : null;
   if (player.profession === 'worker' && currentJob?.paymentType === 'monthly') {
     return { success: false, error: '月薪岗位每轮自动发薪，不能重复手动工作，可选择加班' };
@@ -688,7 +662,7 @@ function handleOvertimeWork(room: GameRoom, playerId: string): { success: boolea
   const blockReason = isPlayerActionBlocked(room, playerId);
   if (blockReason) return { success: false, error: blockReason };
 
-  const currentJob = getWorkerCurrentJob(player, room.gameState.players);
+  const currentJob = getWorkerCurrentJob(player, room.gameState.players, room.gameState.market);
   if (!currentJob.overtimeAllowed || currentJob.paymentType !== 'monthly') {
     return { success: false, error: '当前岗位不支持加班' };
   }
@@ -766,34 +740,15 @@ function handleNegotiateWage(room: GameRoom, playerId: string): { success: boole
   const blockReason = isPlayerActionBlocked(room, playerId);
   if (blockReason) return { success: false, error: blockReason };
 
-  const ability = player.workerAbilities ?? {
-    skill: 30,
-    wageLevel: ECONOMY_BALANCE.worker.baseWage,
-    trainingSessions: 0,
-    unemployedRounds: 0,
-    negotiationPower: 20,
-  };
+  const ability = player.workerAbilities ?? getDefaultWorkerAbilities();
   if (ability.lastNegotiationRound === room.gameState.currentRound) {
     return { success: false, error: '每轮只能谈薪 1 次' };
   }
-  const currentJob = getWorkerCurrentJob(player, room.gameState.players);
-  const marketMinimum = room.gameState.market.laborMarket?.minimumWage ?? Math.round(ECONOMY_BALANCE.worker.baseWage * 0.6);
-  const outsideOptions = getJobOffers(room.gameState.players, player, room.gameState.market.employmentRate)
-    .filter(offer => offer.id !== currentJob.id && isQualifiedForJob(player, offer) && offer.wage >= currentJob.wage * 0.95)
-    .length;
-  const employmentPenalty = (100 - room.gameState.market.employmentRate) * 0.35;
-  const askRatio = clamp((ability.wageLevel - currentJob.wage) / Math.max(currentJob.wage, 1), -0.1, 0.25);
-  const relationshipPenalty = ability.lastNegotiationOutcome === 'rejected' ? 10 : 0;
-  const successChance = clamp(
-    (ability.skill * 0.35 + ability.negotiationPower * 0.45 + outsideOptions * 6 + room.gameState.market.employmentRate * 0.18 - employmentPenalty - askRatio * 80 - relationshipPenalty) / 100,
-    0.12,
-    0.88,
-  );
+  const negotiation = buildWageNegotiationContext(player, room.gameState.players, room.gameState.market);
+  const currentJob = negotiation.currentJob;
   const roll = Math.random();
-  const outcome: 'rejected' | 'small_raise' | 'normal_raise' | 'strong_raise' =
-    roll > successChance ? 'rejected' : roll > successChance * 0.72 ? 'small_raise' : roll > successChance * 0.35 ? 'normal_raise' : 'strong_raise';
-  const raiseMultiplier = outcome === 'strong_raise' ? 1.1 : outcome === 'normal_raise' ? 1.06 : outcome === 'small_raise' ? 1.03 : 1;
-  const newWage = Math.max(marketMinimum, Math.round(ability.wageLevel * raiseMultiplier));
+  const outcome = getWageNegotiationOutcome(negotiation.successChance, roll);
+  const newWage = Math.max(negotiation.marketMinimum, Math.round(ability.wageLevel * getWageRaiseMultiplier(outcome)));
 
   room.gameState.players = room.gameState.players.map(p => {
     if (p.id !== playerId) return p;
@@ -845,7 +800,7 @@ function handleSwitchJob(room: GameRoom, playerId: string, jobId: string): { suc
     unemployedRounds: 0,
     negotiationPower: 20,
   };
-  const offer = getJobOffers(room.gameState.players, player, room.gameState.market.employmentRate).find(item => item.id === jobId);
+  const offer = getJobOffers(room.gameState.players, player, room.gameState.market.employmentRate, room.gameState.market).find(item => item.id === jobId);
   if (!offer) return { success: false, error: '岗位不存在或已失效' };
   const qualified = isQualifiedForJob(player, offer);
 
@@ -1378,12 +1333,9 @@ function handleTakeLoan(room: GameRoom, playerId: string, loanType: LoanType, am
   if (blockReason) return { success: false, error: blockReason };
   if (loanType === 'business' && !player.company) return { success: false, error: '企业贷款需要拥有公司' };
   if (loanType === 'mortgage' && player.housingStatus !== 'owned') return { success: false, error: '房贷需要已有房产作为抵押' };
-
-  const currentDebt = (player.loans ?? []).reduce((sum, loan) => sum + loan.remaining, 0);
-  const creditScore = player.creditScore ?? 70;
-  const debtLimit = creditScore * (loanType === 'business' ? 5000 : loanType === 'mortgage' ? 4000 : 1200);
-  if (currentDebt + amount > debtLimit) {
-    return { success: false, error: `信用额度不足，当前最高可负债约 ¥${Math.max(0, Math.round(debtLimit - currentDebt))}` };
+  const loanCheck = evaluateLoanApplication(player, loanType, amount, room.gameState.market);
+  if (!loanCheck.approved) {
+    return { success: false, error: loanCheck.reason ?? '信用额度不足' };
   }
 
   const loan: Loan = {
@@ -1521,8 +1473,8 @@ function handleBuyMaterials(room: GameRoom, playerId: string, quantity: number):
   const blockReason = isPlayerActionBlocked(room, playerId);
   if (blockReason) return { success: false, error: blockReason };
 
-  const materialPrice = getMaterialUnitPrice(quantity, player.company);
-  const totalCost = getMaterialPurchaseCost(quantity, player.company);
+  const materialPrice = getMaterialUnitPrice(quantity, player.company, room.gameState.market);
+  const totalCost = getMaterialPurchaseCost(quantity, player.company, room.gameState.market);
   
   if (player.cash < totalCost) {
     return { success: false, error: `资金不足，需要 ¥${totalCost}，当前现金 ¥${player.cash}` };
@@ -1596,7 +1548,8 @@ function handleProduceGoods(room: GameRoom, playerId: string, quantity: number):
   }
 
   // 原材料在采购时已付费，生产时只扣加工费，避免重复扣材料现金。
-  const processingCost = getProcessingCost(company.productionType, quantity);
+  const processingCost = getProcessingCost(company.productionType, quantity)
+    + getSupplyChainOverheadCost(company.productionType, quantity, room.gameState.market);
   if (player.cash < processingCost) {
     return { success: false, error: `资金不足，需要 ¥${processingCost}，当前现金 ¥${player.cash}` };
   }
@@ -1610,7 +1563,8 @@ function handleProduceGoods(room: GameRoom, playerId: string, quantity: number):
 
   // 实际消耗
   const actualMaterialUsed = actualProduction * prodConfig.materialConsumption;
-  const actualProcessingCost = getProcessingCost(company.productionType, actualProduction);
+  const actualProcessingCost = getProcessingCost(company.productionType, actualProduction)
+    + getSupplyChainOverheadCost(company.productionType, actualProduction, room.gameState.market);
   const actualCapacityUsed = getProductionCapacityUsage(company.productionType, actualProduction);
 
   room.gameState.players = room.gameState.players.map(p => {
@@ -1845,6 +1799,8 @@ function handleEnactPolicy(room: GameRoom, playerId: string, policyType: PolicyT
   const cooldown = player.policyCooldowns?.[policyType] || 0;
   if (cooldown > 0) return { success: false, error: `政策冷却中，还需 ${cooldown} 轮` };
   if ((player.govAbilities?.treasuryBalance ?? 0) < policy.cost) return { success: false, error: '国库余额不足' };
+  const policyBudgetLimit = player.govAbilities ? getGovernmentPolicyBudgetLimit(player.govAbilities) : 0;
+  if (policy.cost > policyBudgetLimit) return { success: false, error: `预算空间不足，本轮政策上限约 ¥${policyBudgetLimit}` };
 
   room.gameState.pendingPolicies = [
     ...room.gameState.pendingPolicies,
@@ -2143,32 +2099,15 @@ function settleRound(gameState: GameState): GameState {
   market.bank.businessLoanRate = market.bank.centralBankRate + ECONOMY_BALANCE.bank.loanRiskSpread.business;
 
   market.cyclePhase += 1;
-  if (market.cyclePhase >= 4) {
-    market.cyclePhase = 0;
-    const transitions = {
-      overheating: ['overheating', 'growth', 'downturn'],
-      growth: ['growth', 'overheating', 'downturn'],
-      downturn: ['downturn', 'contraction', 'growth'],
-      contraction: ['contraction', 'downturn', 'growth'],
-    } as const;
-    const options = transitions[market.economicCycle];
-    const weights = [0.5, 0.3, 0.2];
-    const roll = Math.random();
-    market.economicCycle = roll < weights[0] ? options[0] : roll < weights[0] + weights[1] ? options[1] : options[2];
-  }
+  const cycleSignal = deriveEconomicCycle(market, gameState.players);
+  market.economicCycle = cycleSignal.economicCycle;
+  market.cyclePhase = cycleSignal.cyclePhase;
 
   const assetBatches = [...gameState.assetBatches];
   const batchReturns: Record<string, number> = {};
-  const cycleMultipliers = CYCLE_MULTIPLIERS[market.economicCycle];
 
   for (const batch of assetBatches) {
-    const config = INVESTMENT_CONFIGS[batch.type];
-    const ratePressure = batch.type === 'bond'
-      ? (market.bank.centralBankRate - ECONOMY_BALANCE.bank.baseRate) * -4
-      : 0;
-    const inflationHedge = batch.type === 'gold' ? Math.max(0, market.inflationRate) * 0.35 : 0;
-    const marketReturn = config.baseReturn + ratePressure + inflationHedge + (Math.random() - 0.5) * config.volatility;
-    batchReturns[batch.batchId] = 1 + marketReturn * cycleMultipliers[batch.type];
+    batchReturns[batch.batchId] = calculateAssetReturnMultiplier(batch.type, market);
   }
 
   let taxRevenue = 0;
@@ -2264,7 +2203,7 @@ function settleRound(gameState: GameState): GameState {
 
     const fatiguePenalty = Math.max(0, player.workState.fatigueLevel - 60);
     const fatigueHealthPenalty = player.workState.fatigueLevel >= 80
-      ? Math.ceil((player.workState.fatigueLevel - 75) / 8)
+      ? Math.ceil((player.workState.fatigueLevel - 70) / 4)
       : 0;
     const forcedRestBeforeSettlement = getForcedRestTrigger(player);
     health += 7 - Math.floor(fatiguePenalty / 8) - fatigueHealthPenalty;
@@ -2285,7 +2224,7 @@ function settleRound(gameState: GameState): GameState {
           );
         }
       } else {
-        const currentJob = getWorkerCurrentJob({ ...player, workerAbilities }, gameState.players);
+        const currentJob = getWorkerCurrentJob({ ...player, workerAbilities }, gameState.players, gameState.market);
         if (
           currentJob.paymentType === 'monthly'
           && player.workState.monthlySalaryPaidRound !== gameState.currentRound
@@ -2328,7 +2267,8 @@ function settleRound(gameState: GameState): GameState {
         const actualProduction = Math.min(company.autoProduction.monthlyTarget, maxByCapacity, maxByMaterials);
 
         if (actualProduction > 0) {
-          const productionCost = getProcessingCost(company.productionType, actualProduction);
+          const productionCost = getProcessingCost(company.productionType, actualProduction)
+            + getSupplyChainOverheadCost(company.productionType, actualProduction, market);
           const materialUsed = actualProduction * prodConfig.materialConsumption;
           const sellingPrice = prodConfig.baseSellingPrice * (1 + (company.productQuality - 60) / 200);
           const sd = market.supplyDemand[company.productionType];
@@ -2451,7 +2391,7 @@ function settleRound(gameState: GameState): GameState {
         workCount: 0,
         overtimeCount: 0,
         fatigueLevel: Math.max(0, player.workState.fatigueLevel - 20 + monthlyJobFatigueCost),
-        monthlySalaryPaidRound: player.profession === 'worker' && workerAbilities?.paymentType === 'monthly'
+        monthlySalaryPaidRound: player.profession === 'worker' && getWorkerCurrentJob({ ...player, workerAbilities }, gameState.players, gameState.market).paymentType === 'monthly'
           ? gameState.currentRound
           : player.workState.monthlySalaryPaidRound,
         forcedRestRounds: forcedRestAfterSettlement,
@@ -2464,8 +2404,20 @@ function settleRound(gameState: GameState): GameState {
     };
   });
 
-  const playersWithMarketShare = recalculateMarketShare(players, monthlyCompanySales);
+  const playersWithMarketShare = recalculatePlayerMarketShare(players, monthlyCompanySales, market);
+  market.externalSector = deriveExternalSector(market);
+  market.creditConditions = deriveCreditConditions(market);
+  market.bank = {
+    ...getBankRates(gameState),
+    centralBankRate: market.bank?.centralBankRate ?? getBankRates(gameState).centralBankRate,
+    depositRate: market.bank?.depositRate ?? getBankRates(gameState).depositRate,
+    consumerLoanRate: (market.bank?.centralBankRate ?? getBankRates(gameState).centralBankRate) + ECONOMY_BALANCE.bank.loanRiskSpread.consumer + (market.creditConditions.riskPremium ?? 0),
+    mortgageRate: (market.bank?.centralBankRate ?? getBankRates(gameState).centralBankRate) + ECONOMY_BALANCE.bank.loanRiskSpread.mortgage + (market.creditConditions.riskPremium ?? 0) * 0.55,
+    businessLoanRate: (market.bank?.centralBankRate ?? getBankRates(gameState).centralBankRate) + ECONOMY_BALANCE.bank.loanRiskSpread.business + (market.creditConditions.riskPremium ?? 0) * 1.25,
+    defaultedLoans: market.bank?.defaultedLoans ?? getBankRates(gameState).defaultedLoans,
+  };
   market.macroState = deriveMacroState(playersWithMarketShare, market);
+  market.supplyChain = deriveSupplyChainState(market);
   market.households = updateHouseholdsForMacro(playersWithMarketShare, market);
   market.npcFirms = updateNpcFirmsForMacro(market);
   const householdDemand = calculateHouseholdDemandBySegment(market.households, market);
@@ -2473,7 +2425,7 @@ function settleRound(gameState: GameState): GameState {
   Object.keys(market.goods).forEach(key => {
     const goodType = key as GoodType;
     const sd = market.supplyDemand[goodType];
-    const baselineDemand = Math.max(getBaselineMarketDemand(goodType), householdDemand[goodType] ?? 20);
+    const baselineDemand = Math.max(getBaselineMarketDemand(goodType) * 0.35, householdDemand[goodType] ?? 20);
     sd.demand = Math.max(1, Math.round(sd.demand * 0.46 + baselineDemand * 0.54));
     sd.supply = Math.max(5, Math.round(sd.supply * 0.58 + (npcSupply[goodType] ?? 0) * 0.42));
   });
@@ -2484,6 +2436,9 @@ function settleRound(gameState: GameState): GameState {
   market.inventoryPressure = adjustedMarket.inventoryPressure;
   market.shortageIndex = adjustedMarket.shortageIndex;
   market.supplyDemand = adjustedMarket.supplyDemand;
+  const finalCycleSignal = deriveEconomicCycle(market, playersWithMarketShare);
+  market.economicCycle = finalCycleSignal.economicCycle;
+  market.cyclePhase = finalCycleSignal.cyclePhase;
   const playersAfterPolicy = playersWithMarketShare.map(player => {
     const delta = policyTransmission.playerCashDelta[player.id] ?? 0;
     return delta === 0 ? player : { ...player, cash: Math.round((player.cash + delta) * 100) / 100 };
@@ -2498,16 +2453,55 @@ function settleRound(gameState: GameState): GameState {
       ? { ...player, govAbilities: { ...player.govAbilities, treasuryBalance: player.govAbilities.treasuryBalance + taxRevenue } }
       : player)
     : playersAfterPolicy;
+  const governmentFeedback = deriveGovernmentFeedback(playersWithTax, market);
+  const playersWithGovernmentFeedback = playersWithTax.map(player => {
+    if (player.profession !== 'government' || !player.govAbilities || !governmentFeedback) return player;
+    const removedByEconomicOutcome = (governmentFeedback.removalRisk ?? 0) >= 92 && (governmentFeedback.approvalRating ?? 100) < 22;
+    if (removedByEconomicOutcome) {
+      return {
+        ...player,
+        profession: 'worker' as const,
+        govAbilities: undefined,
+        policyCooldowns: undefined,
+        workerAbilities: ({
+          wageLevel: ECONOMY_BALANCE.worker.baseWage,
+          skill: 35,
+          trainingSessions: 0,
+          negotiationPower: 20,
+          experience: 0,
+          educationLevel: 0,
+          currentJobId: 'temp_delivery',
+          unemployedRounds: 1,
+          paymentType: 'hourly',
+          employerId: 'npc_service',
+          jobTitle: '临时服务岗',
+          contractType: 'hourly',
+          hoursPerRound: 8,
+          benefits: 0.05,
+          promotionTrack: '临时岗->服务业->管理岗',
+          jobSecurity: 40,
+          industry: 'public_service',
+        } satisfies NonNullable<Player['workerAbilities']>),
+      };
+    }
+    return {
+      ...player,
+      govAbilities: {
+        ...player.govAbilities,
+        ...governmentFeedback,
+      },
+    };
+  });
 
   market.monthlyTaxRevenue = Math.round(taxRevenue * 100) / 100;
-  market.gdp = playersWithTax.reduce((sum, player) => sum + Math.max(0, player.cash), 0)
+  market.gdp = playersWithGovernmentFeedback.reduce((sum, player) => sum + Math.max(0, player.cash), 0)
     + market.npcFirms.reduce((sum, firm) => sum + firm.plannedSupply * 4, 0);
   market.inflationRate = Math.max(-0.1, Math.min(0.3, market.inflationRate + (Math.random() - 0.5) * 0.02));
   market.policyStabilityModifier = (market.policyStabilityModifier ?? 0) * 0.75;
   market.productivityBonus = (market.productivityBonus ?? 0) * 0.95;
-  applyLingeringEventPressure(market, gameState.activeEvents);
+  applyLingeringNewsPressure(market, gameState.activeEvents);
   market.socialStability = clamp(
-    calculateSocialStability(playersWithTax)
+    calculateSocialStability(playersWithGovernmentFeedback)
     + (market.policyStabilityModifier ?? 0)
     + market.macroState.consumerConfidence * 0.03
     - market.creditConditions.defaultRate * 40,
@@ -2515,7 +2509,7 @@ function settleRound(gameState: GameState): GameState {
     100,
   );
 
-  const incomes = playersWithTax.map(p => Math.max(0, p.cash)).sort((a, b) => a - b);
+  const incomes = playersWithGovernmentFeedback.map(p => Math.max(0, p.cash)).sort((a, b) => a - b);
   const sumIncomes = incomes.reduce((sum, income) => sum + income, 0);
   if (incomes.length > 0 && sumIncomes > 0) {
     let weighted = 0;
@@ -2535,16 +2529,23 @@ function settleRound(gameState: GameState): GameState {
     .filter(event => (event.remainingDuration ?? 0) > 0);
   const nextRound = gameState.currentRound + 1;
   const policyApplication = applyPendingPoliciesForRound(gameState, market, nextRound);
+  gameState.gameLog.push({
+    id: generateId(),
+    round: nextRound,
+    timestamp: Date.now(),
+    type: 'system',
+    message: `经济因果链：${describeRoundCausalChain(policyApplication.market, playersWithGovernmentFeedback)}`,
+  });
 
   return {
     ...gameState,
-    players: playersWithTax,
+    players: playersWithGovernmentFeedback,
     market: policyApplication.market,
     activeEvents: nextActiveEvents,
     assetBatches,
     pendingPolicies: policyApplication.remainingPolicies,
     currentNews: policyApplication.appliedNews,
-    victoryScores: calculateVictoryScores(playersWithTax, policyApplication.market),
+    victoryScores: calculateVictoryScores(playersWithGovernmentFeedback, policyApplication.market),
   };
 }
 

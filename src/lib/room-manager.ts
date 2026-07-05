@@ -70,12 +70,12 @@ export interface PlayerAction {
 class RoomManager {
   private rooms: Map<string, GameRoom> = new Map();
   private playerConnections: Map<string, { roomId: string; playerId: string }> = new Map();
-  private readonly roomTtlMs = 6 * 60 * 60 * 1000;
-  private readonly finishedRoomTtlMs = 30 * 60 * 1000;
+  private readonly roomTtlMs = 12 * 60 * 60 * 1000;
   private readonly store = new FileRoomStore();
 
   constructor() {
     this.loadPersistedRooms();
+    this.cleanupExpiredRooms();
     this.persistRooms();
   }
 
@@ -474,9 +474,7 @@ class RoomManager {
   cleanupExpiredRooms(now = Date.now()): string[] {
     const deleted: string[] = [];
     for (const room of this.rooms.values()) {
-      const ttl = room.status === 'finished' ? this.finishedRoomTtlMs : this.roomTtlMs;
-      const allDisconnected = room.players.every(player => !player.isConnected);
-      if (allDisconnected && now - room.updatedAt > ttl) {
+      if (now - room.createdAt > this.roomTtlMs) {
         this.deleteRoom(room.id);
         deleted.push(room.id);
       }

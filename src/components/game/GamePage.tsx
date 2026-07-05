@@ -5,6 +5,7 @@ import { useGame } from '@/contexts/GameContext';
 import { CurrentPlayerBanner, PlayerOrderDisplay } from './CurrentPlayerBanner';
 import { MarketStats, PlayerStats, AllPlayersOverview, Leaderboard } from './StatsPanels';
 import { PlayerActions } from './PlayerActions';
+import { EconomyCausalPanel } from './EconomyCausalPanel';
 import { GameWorkbench } from './workbench';
 import {
   TradeConfirmationModal,
@@ -45,6 +46,7 @@ export function GamePage() {
         main={<PlayerActions />}
         right={(
           <>
+            <EconomyCausalPanel gameState={state} />
             <AllPlayersOverview />
             <Leaderboard />
             <GameLog />

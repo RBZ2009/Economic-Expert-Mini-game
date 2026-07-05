@@ -44,6 +44,10 @@ import { Input } from '@/components/ui/input';
 import { AlertDialog, AlertDialogAction, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { ActionSection, ActionWorkspace, GameWorkbench, MetricStrip, StatusBadge, type ActionAdapter } from '@/components/game/workbench';
 import { RoomOptionsMenu } from '@/components/room/RoomOptionsMenu';
+import { EventEffectsView } from '@/components/game/EventEffectsView';
+import { EconomyCausalPanel } from '@/components/game/EconomyCausalPanel';
+import { AssetPricingPanel } from '@/components/game/AssetPricingPanel';
+import { GovernmentFeedbackPanel } from '@/components/game/GovernmentFeedbackPanel';
 
 type SendGameAction = (action: { type: string; payload: Record<string, unknown> }) => void;
 
@@ -170,6 +174,7 @@ export function MultiplayerGamePage() {
         )}
         right={(
           <>
+            <EconomyCausalPanel gameState={gameState} />
             <MarketPricesPanel gameState={gameState} />
             <OtherPlayersPanel 
               gameState={gameState} 
@@ -226,37 +231,8 @@ function RoundEndEventDialog({ event, onDismiss }: { event: RoundEndPayload | nu
                 </div>
               )}
               {event.event?.effects && Object.keys(event.event.effects).length > 0 && (
-                <div className="mt-3 space-y-1 text-xs text-yellow-800 dark:text-yellow-200">
-                  {event.event.effects.inflation !== undefined && (
-                    <div className="flex justify-between">
-                      <span>通货膨胀率</span>
-                      <span>{event.event.effects.inflation > 0 ? '+' : ''}{formatPercent(event.event.effects.inflation, 1)}</span>
-                    </div>
-                  )}
-                  {event.event.effects.employment !== undefined && (
-                    <div className="flex justify-between">
-                      <span>就业率</span>
-                      <span>{event.event.effects.employment > 0 ? '+' : ''}{event.event.effects.employment}%</span>
-                    </div>
-                  )}
-                  {event.event.effects.socialStability !== undefined && (
-                    <div className="flex justify-between">
-                      <span>社会稳定度</span>
-                      <span>{event.event.effects.socialStability > 0 ? '+' : ''}{event.event.effects.socialStability}</span>
-                    </div>
-                  )}
-                  {event.event.effects.stockMarket && (
-                    <div className="flex justify-between">
-                      <span>股市指数</span>
-                      <span>{event.event.effects.stockMarket.indexChange > 0 ? '+' : ''}{formatPercent(event.event.effects.stockMarket.indexChange, 0)}</span>
-                    </div>
-                  )}
-                  {event.event.effects.specificGoodPrice && (
-                    <div className="flex justify-between">
-                      <span>指定商品价格</span>
-                      <span>{event.event.effects.specificGoodPrice.goodType} x{event.event.effects.specificGoodPrice.multiplier}</span>
-                    </div>
-                  )}
+                <div className="mt-3 rounded border border-yellow-200 bg-white/60 p-2 text-xs dark:border-yellow-800 dark:bg-black/20">
+                  <EventEffectsView effects={event.event.effects} />
                 </div>
               )}
             </div>
@@ -484,6 +460,11 @@ function FullActionPanel({ adapter }: { adapter: ActionAdapter }) {
           简单模式：先学会照顾生活必需品、工作赚钱、观察价格，再逐步理解更复杂的投资和贷款。
         </div>
       )}
+      {!isSimpleMode && (
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800 dark:border-slate-800 dark:bg-slate-950/30 dark:text-slate-100">
+          专业模式：完整展示供应链、信用、外需、利润结构和政策反馈，适合根据经济环境制定策略。
+        </div>
+      )}
 
       <ActionSection
         value="required"
@@ -547,9 +528,9 @@ function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player
   const profession = PROFESSION_CONFIGS[myPlayer.profession] as ProfessionConfig;
   const workerAbilities = myPlayer.workerAbilities;
   const isUnemployed = (workerAbilities?.unemployedRounds ?? 0) > 0;
-  const currentJob = myPlayer.profession === 'worker' ? getWorkerCurrentJob(myPlayer, gameState.players) : null;
+  const currentJob = myPlayer.profession === 'worker' ? getWorkerCurrentJob(myPlayer, gameState.players, gameState.market) : null;
   const jobOffers = myPlayer.profession === 'worker'
-    ? getJobOffers(gameState.players, myPlayer, gameState.market.employmentRate)
+    ? getJobOffers(gameState.players, myPlayer, gameState.market.employmentRate, gameState.market)
     : [];
   const workLimit = currentJob?.paymentType === 'hourly' ? currentJob.maxWorkPerRound : profession.maxWorkPerRound;
   const workRemaining = Math.max(0, workLimit - myPlayer.workState.workCount);
@@ -680,6 +661,8 @@ function WorkActionPanel({ myPlayer, gameState, sendAction }: { myPlayer: Player
                     <span>{offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound} 次/轮` : '自动发薪'}</span>
                     <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
                     <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
+                    <span>行业 {offer.industry}</span>
+                    <span>稳定 {offer.jobSecurity}/福利 {formatPercent(offer.benefits, 0)}%</span>
                   </div>
                   <p className="mt-1 text-muted-foreground">{offer.description}</p>
                   <Button
@@ -1039,20 +1022,6 @@ function InvestmentPanel({ myPlayer, sendAction, gameState }: { myPlayer: Player
   const transactionFee = Math.round(investmentAmount * ECONOMY_BALANCE.investment.transactionFeeRate);
   const totalInvestmentCost = investmentAmount + transactionFee;
 
-  // 经济周期信息
-  const CYCLE_NAMES: Record<string, { name: string; icon: string; description: string }> = {
-    growth: { name: '增长期', icon: '📈', description: '经济上行，投资收益增加' },
-    stable: { name: '稳定期', icon: '➡️', description: '经济平稳，收益适中' },
-    downturn: { name: '衰退期', icon: '📉', description: '经济下行，风险增加' },
-    overheating: { name: '过热期', icon: '🔥', description: '经济过热，通胀风险高' },
-  };
-
-  // 计算投资建议
-  const getCycleInfo = () => {
-    const cycle = gameState.market.economicCycle || 'stable';
-    return CYCLE_NAMES[cycle] || CYCLE_NAMES.stable;
-  };
-
   // 学习费用计算
   const getLearningCost = () => {
     if (!investorAbilities) return 0;
@@ -1070,12 +1039,12 @@ function InvestmentPanel({ myPlayer, sendAction, gameState }: { myPlayer: Player
         <div className="p-3 border rounded-lg bg-gradient-to-r from-cyan-50 to-cyan-100 dark:from-cyan-950/30 dark:to-cyan-900/30">
           <div className="flex items-center justify-between mb-2">
             <h4 className="font-medium flex items-center gap-2">
-              {getCycleInfo().icon} 经济周期: {getCycleInfo().name}
+              {CYCLE_NAMES[gameState.market.economicCycle].icon} 经济周期: {CYCLE_NAMES[gameState.market.economicCycle].name}
               <Badge variant="outline" className="text-xs bg-cyan-50">投资者可见</Badge>
             </h4>
           </div>
           <p className="text-xs text-muted-foreground mb-2">
-            {getCycleInfo().description}
+            {CYCLE_NAMES[gameState.market.economicCycle].description}
           </p>
           <div className="mt-2 p-2 bg-white/50 dark:bg-black/20 rounded text-xs">
             <div className="font-medium text-green-600">
@@ -1086,12 +1055,16 @@ function InvestmentPanel({ myPlayer, sendAction, gameState }: { myPlayer: Player
       ) : (
         <div className="p-3 border rounded-lg bg-muted/30">
           <h4 className="font-medium mb-1 text-muted-foreground">
-            {getCycleInfo().icon} 经济周期: {getCycleInfo().name}
+            {CYCLE_NAMES[gameState.market.economicCycle].icon} 经济周期: {CYCLE_NAMES[gameState.market.economicCycle].name}
           </h4>
           <p className="text-xs text-muted-foreground">
             其他玩家无法查看详细经济形势（投资者可查看）
           </p>
         </div>
+      )}
+
+      {isInvestor && (
+        <AssetPricingPanel gameState={gameState} selectedType={investmentType} />
       )}
 
       {/* 投资者学习系统 */}
@@ -1288,6 +1261,15 @@ function BankPanel({ myPlayer, sendAction, gameState }: { myPlayer: Player; send
         </div>
       </div>
 
+      <div className="mb-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+        <CreditMetric label="消费贷审批" value={formatPercent(gameState.market.creditConditions.consumerApprovalRate ?? 0.62, 0)} tone={(gameState.market.creditConditions.consumerApprovalRate ?? 0.62) > 0.55 ? 'good' : 'warn'} />
+        <CreditMetric label="企业贷审批" value={formatPercent(gameState.market.creditConditions.businessApprovalRate ?? 0.58, 0)} tone={(gameState.market.creditConditions.businessApprovalRate ?? 0.58) > 0.5 ? 'good' : 'warn'} />
+        <CreditMetric label="房贷审批" value={formatPercent(gameState.market.creditConditions.mortgageApprovalRate, 0)} tone={gameState.market.creditConditions.mortgageApprovalRate > 0.55 ? 'good' : 'warn'} />
+        <CreditMetric label="抵押折扣" value={formatPercent(gameState.market.creditConditions.collateralHaircut ?? 0.28, 0)} tone={(gameState.market.creditConditions.collateralHaircut ?? 0.28) > 0.45 ? 'bad' : 'default'} />
+        <CreditMetric label="风险溢价" value={formatPercent(gameState.market.creditConditions.riskPremium ?? 0.018, 2)} tone={(gameState.market.creditConditions.riskPremium ?? 0.018) > 0.04 ? 'bad' : 'default'} />
+        <CreditMetric label="坏账压力" value={formatPercent(gameState.market.creditConditions.badDebtPressure ?? 0.12, 0)} tone={(gameState.market.creditConditions.badDebtPressure ?? 0.12) > 0.45 ? 'bad' : 'default'} />
+      </div>
+
       <div className="flex items-center gap-2 mb-2">
         <Input value={loanAmount} onChange={(event) => setLoanAmount(event.target.value)} className="w-28" />
         <Button size="sm" variant="outline" disabled={amount < 1000} onClick={() => sendAction({ type: 'TAKE_LOAN', payload: { playerId: myPlayer.id, loanType: 'consumer', amount } })}>
@@ -1313,6 +1295,22 @@ function BankPanel({ myPlayer, sendAction, gameState }: { myPlayer: Player; send
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function CreditMetric({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'good' | 'warn' | 'bad' }) {
+  const color = tone === 'good'
+    ? 'text-green-700 dark:text-green-400'
+    : tone === 'warn'
+      ? 'text-amber-700 dark:text-amber-400'
+      : tone === 'bad'
+        ? 'text-red-700 dark:text-red-400'
+        : 'text-foreground';
+  return (
+    <div className="rounded bg-muted/40 p-2 text-center">
+      <div className={`font-bold ${color}`}>{value}</div>
+      <div className="text-muted-foreground">{label}</div>
     </div>
   );
 }
@@ -1948,6 +1946,10 @@ function SpecialProfessionPanel({ myPlayer, sendAction, gameState }: { myPlayer:
             </div>
           )}
         </div>
+
+        {myPlayer.govAbilities && (
+          <GovernmentFeedbackPanel government={myPlayer} gameState={gameState} />
+        )}
 
         {/* 税收政策 */}
         <div className="p-3 border rounded-lg">

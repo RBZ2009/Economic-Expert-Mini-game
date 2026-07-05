@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { createWsConnection, type WsMessage, type RoomState, type RoomPlayerInfo } from '@/lib/ws-client';
 import { GameMode, Player, PlayerProfession, GameState, RandomEvent } from '@/types/game';
+import { markRoundNewsIfNew, shouldShowGameStateNews } from '@/lib/multiplayer-news';
 
 // ==================== 类型定义 ====================
 
@@ -18,10 +19,6 @@ interface RoundEndMessagePayload {
   event: RandomEvent;
   market: GameState['market'];
   players: Partial<Player>[];
-}
-
-function getRoundNewsKey(event: RandomEvent, round: number): string {
-  return `${round}:${event.id || event.name}`;
 }
 
 interface RoomContextType {
@@ -182,8 +179,7 @@ function processMessage(
     case 'game:state': {
       const data = payload as { gameState: GameState; currentPlayerId?: string };
       setters.setGameState(data.gameState);
-      const isEnteringNewGameRound = !currentGameState || currentGameState.currentRound !== data.gameState.currentRound;
-      if (data.gameState.currentNews && isEnteringNewGameRound) {
+      if (shouldShowGameStateNews(currentGameState, data.gameState) && data.gameState.currentNews) {
         setters.showRoundEndEvent({
           event: data.gameState.currentNews,
           completedRound: Math.max(0, data.gameState.currentRound - 1),
@@ -323,9 +319,7 @@ export function RoomProvider({ children }: { children: React.ReactNode }) {
     !hasCompletedRound;
 
   const showRoundEndEventOnce = useCallback((event: RoundEndEvent) => {
-    const key = getRoundNewsKey(event.event, event.newRound);
-    if (shownNewsKeysRef.current.has(key)) return;
-    shownNewsKeysRef.current.add(key);
+    if (!markRoundNewsIfNew(shownNewsKeysRef.current, event)) return;
     setRoundEndEvent(event);
   }, []);
 

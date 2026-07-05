@@ -39,6 +39,48 @@ export function EventEffectsView({ effects, title = '事件影响' }: { effects:
           positive={effects.specificGoodPrice.multiplier < 1}
         />
       )}
+      {effects.creditTightness?.household !== undefined && (
+        <EffectRow
+          label="居民信贷紧缩"
+          value={`${effects.creditTightness.household > 0 ? '+' : ''}${formatPercent(effects.creditTightness.household, 1)}`}
+          positive={effects.creditTightness.household < 0}
+        />
+      )}
+      {effects.creditTightness?.business !== undefined && (
+        <EffectRow
+          label="企业信贷紧缩"
+          value={`${effects.creditTightness.business > 0 ? '+' : ''}${formatPercent(effects.creditTightness.business, 1)}`}
+          positive={effects.creditTightness.business < 0}
+        />
+      )}
+      {effects.externalSector?.importCostIndex !== undefined && (
+        <EffectRow
+          label="进口成本指数"
+          value={`${effects.externalSector.importCostIndex > 0 ? '+' : ''}${effects.externalSector.importCostIndex}`}
+          positive={effects.externalSector.importCostIndex < 0}
+        />
+      )}
+      {effects.externalSector?.exportDemandIndex !== undefined && (
+        <EffectRow
+          label="外部需求指数"
+          value={`${effects.externalSector.exportDemandIndex > 0 ? '+' : ''}${effects.externalSector.exportDemandIndex}`}
+          positive={effects.externalSector.exportDemandIndex > 0}
+        />
+      )}
+      {effects.externalSector?.logisticsStress !== undefined && (
+        <EffectRow
+          label="物流压力"
+          value={`${effects.externalSector.logisticsStress > 0 ? '+' : ''}${formatPercent(effects.externalSector.logisticsStress, 1)}`}
+          positive={effects.externalSector.logisticsStress < 0}
+        />
+      )}
+      {effects.externalSector?.energyPriceIndex !== undefined && (
+        <EffectRow
+          label="能源价格指数"
+          value={`${effects.externalSector.energyPriceIndex > 0 ? '+' : ''}${effects.externalSector.energyPriceIndex}`}
+          positive={effects.externalSector.energyPriceIndex < 0}
+        />
+      )}
     </div>
   );
 }

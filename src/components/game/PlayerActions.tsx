@@ -6,9 +6,11 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
-import { GoodType, PROFESSION_CONFIGS, INVESTMENT_CONFIGS, MACHINE_CONFIGS, HousingTier, HOUSING_CONFIGS, InvestmentType, POLICY_CONFIGS, PolicyType, formatCurrency, formatPercent, formatNumber, CYCLE_NAMES, CYCLE_MULTIPLIERS, PRODUCTION_CONFIGS, ECONOMY_BALANCE, ProductionGoodType } from '@/types/game';
+import { GoodType, PROFESSION_CONFIGS, INVESTMENT_CONFIGS, MACHINE_CONFIGS, HousingTier, HOUSING_CONFIGS, InvestmentType, POLICY_CONFIGS, PolicyType, formatCurrency, formatPercent, formatNumber, CYCLE_NAMES, PRODUCTION_CONFIGS, ECONOMY_BALANCE, ProductionGoodType } from '@/types/game';
 import { estimateProductSales, findBestSaleOption, getProductInventory, productionGoodTypes } from './company-helpers';
 import { ActionSection, ActionWorkspace, MetricStrip, StatusBadge, type ActionAdapter } from './workbench';
+import { AssetPricingPanel } from './AssetPricingPanel';
+import { GovernmentFeedbackPanel } from './GovernmentFeedbackPanel';
 import { getJobOffers, getWorkerCurrentJob, getWorkerEducationLevel, getWorkerExperience, isQualifiedForJob } from '@/game/jobs';
 import {
   getCompanyCapacityUnits,
@@ -378,6 +380,15 @@ function BankPanel() {
         </div>
       </div>
 
+      <div className="mb-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-3">
+        <CreditMetric label="消费贷审批" value={formatPercent(state.market.creditConditions.consumerApprovalRate ?? 0.62, 0)} tone={(state.market.creditConditions.consumerApprovalRate ?? 0.62) > 0.55 ? 'good' : 'warn'} />
+        <CreditMetric label="企业贷审批" value={formatPercent(state.market.creditConditions.businessApprovalRate ?? 0.58, 0)} tone={(state.market.creditConditions.businessApprovalRate ?? 0.58) > 0.5 ? 'good' : 'warn'} />
+        <CreditMetric label="房贷审批" value={formatPercent(state.market.creditConditions.mortgageApprovalRate, 0)} tone={state.market.creditConditions.mortgageApprovalRate > 0.55 ? 'good' : 'warn'} />
+        <CreditMetric label="抵押折扣" value={formatPercent(state.market.creditConditions.collateralHaircut ?? 0.28, 0)} tone={(state.market.creditConditions.collateralHaircut ?? 0.28) > 0.45 ? 'bad' : 'default'} />
+        <CreditMetric label="风险溢价" value={formatPercent(state.market.creditConditions.riskPremium ?? 0.018, 2)} tone={(state.market.creditConditions.riskPremium ?? 0.018) > 0.04 ? 'bad' : 'default'} />
+        <CreditMetric label="坏账压力" value={formatPercent(state.market.creditConditions.badDebtPressure ?? 0.12, 0)} tone={(state.market.creditConditions.badDebtPressure ?? 0.12) > 0.45 ? 'bad' : 'default'} />
+      </div>
+
       <div className="flex flex-wrap items-center gap-2 mb-2">
         <Input value={loanAmount} onChange={(event) => setLoanAmount(event.target.value)} className="w-28" />
         <Button
@@ -442,9 +453,9 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
 
   const profession = PROFESSION_CONFIGS[currentPlayer.profession];
   const workerAbility = currentPlayer.workerAbilities;
-  const currentJob = currentPlayer.profession === 'worker' ? getWorkerCurrentJob(currentPlayer, state.players) : null;
+  const currentJob = currentPlayer.profession === 'worker' ? getWorkerCurrentJob(currentPlayer, state.players, state.market) : null;
   const jobOffers = currentPlayer.profession === 'worker'
-    ? getJobOffers(state.players, currentPlayer, state.market.employmentRate)
+    ? getJobOffers(state.players, currentPlayer, state.market.employmentRate, state.market)
     : [];
   const baseIncome = currentJob?.wage ?? workerAbility?.wageLevel ?? profession.baseIncome;
   const afterTax = baseIncome * (1 - state.market.globalTaxRate);
@@ -540,6 +551,8 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
                       <span>次数 {offer.paymentType === 'hourly' ? `${offer.maxWorkPerRound}/轮` : '自动发薪'}</span>
                       <span>门槛 技能{offer.requiredSkill}/学历{offer.requiredEducation}/经验{offer.requiredExperience}</span>
                       <span>消耗 健康-{offer.healthCost}/幸福-{offer.happinessCost}/疲劳+{offer.fatigueCost}</span>
+                      <span>行业 {offer.industry}</span>
+                      <span>稳定 {offer.jobSecurity}/福利 {formatPercent(offer.benefits, 0)}%</span>
                     </div>
                     <p className="mt-1 text-muted-foreground">{offer.description}</p>
                     <Button
@@ -558,6 +571,22 @@ function WorkCard({ canWork, fatigueWarning }: { canWork: boolean; fatigueWarnin
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function CreditMetric({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'good' | 'warn' | 'bad' }) {
+  const color = tone === 'good'
+    ? 'text-green-700 dark:text-green-400'
+    : tone === 'warn'
+      ? 'text-amber-700 dark:text-amber-400'
+      : tone === 'bad'
+        ? 'text-red-700 dark:text-red-400'
+        : 'text-foreground';
+  return (
+    <div className="rounded bg-muted/40 p-2 text-center">
+      <div className={`font-bold ${color}`}>{value}</div>
+      <div className="text-muted-foreground">{label}</div>
     </div>
   );
 }
@@ -708,30 +737,6 @@ function InvestmentPanel() {
   const transactionFee = Math.round(investmentAmount * ECONOMY_BALANCE.investment.transactionFeeRate);
   const totalInvestmentCost = investmentAmount + transactionFee;
 
-  // 计算投资建议（基于经济周期和投资者技能）
-  const getInvestmentAdvice = () => {
-    const cycle = state.market.economicCycle;
-    const multipliers = CYCLE_MULTIPLIERS[cycle];
-    const sorted = Object.entries(multipliers).sort((a, b) => b[1] - a[1]);
-    const best = sorted[0];
-    
-    const bestConfig = INVESTMENT_CONFIGS[best[0] as InvestmentType];
-    if (isInvestor && investorAbilities) {
-      const skill = investorAbilities.investmentSkill;
-      return {
-        recommendation: `${bestConfig.name} - 预期收益 ${formatPercent(best[1], 0)}%`,
-        warning: skill < 50 ? `投资技能较低(${skill}%)，建议分散投资降低风险` : null,
-        skillBonus: `您的技能加成：+${formatPercent(skill / 2, 1)}%`,
-      };
-    }
-    
-    return {
-      recommendation: `推荐关注 ${bestConfig.name}`,
-      warning: null,
-      skillBonus: null,
-    };
-  };
-
   // 学习费用计算
   const getLearningCost = () => {
     if (!investorAbilities) return 0;
@@ -756,22 +761,10 @@ function InvestmentPanel() {
           <p className="text-xs text-muted-foreground mb-2">
             {CYCLE_NAMES[state.market.economicCycle].description}
           </p>
-          <div className="text-xs mb-2">
-            <span className="font-medium">各产品预期收益：</span>
-            {Object.entries(CYCLE_MULTIPLIERS[state.market.economicCycle]).map(([type, mult]) => (
-              <span key={type} className={`ml-2 ${mult > 1.2 ? 'text-green-600 font-medium' : mult < 0.8 ? 'text-red-600' : 'text-gray-600'}`}>
-                {INVESTMENT_CONFIGS[type as InvestmentType].icon}{formatPercent(mult, 0)}%
-              </span>
-            ))}
-          </div>
           <div className="mt-2 p-2 bg-white/50 dark:bg-black/20 rounded text-xs">
-            <div className="font-medium text-green-600">{getInvestmentAdvice().recommendation}</div>
-            {getInvestmentAdvice().warning && (
-              <div className="text-amber-600 mt-1">{getInvestmentAdvice().warning}</div>
-            )}
-            {getInvestmentAdvice().skillBonus && (
-              <div className="text-blue-600 mt-1">{getInvestmentAdvice().skillBonus}</div>
-            )}
+            <div className="font-medium text-blue-600">
+              投资者技能加成：+{(investorAbilities?.investmentSkill || 0) / 2}% 收益；技能越高，市场误判概率越低。
+            </div>
           </div>
         </div>
       ) : (
@@ -783,6 +776,10 @@ function InvestmentPanel() {
             其他玩家无法查看详细经济形势（投资者可查看）
           </p>
         </div>
+      )}
+
+      {isInvestor && (
+        <AssetPricingPanel gameState={state} selectedType={selectedType} />
       )}
 
       {/* 投资者学习系统 */}
@@ -1780,7 +1777,7 @@ function EntrepreneurActions() {
 
 // ==================== 政府官员功能（政策系统）====================
 function GovernmentActions() {
-  const { dispatch, getCurrentPlayer } = useGame();
+  const { state, dispatch, getCurrentPlayer } = useGame();
   const currentPlayer = getCurrentPlayer();
   const [taxRate, setTaxRate] = React.useState(currentPlayer?.taxRate ? (currentPlayer.taxRate * 100).toString() : '20');
   const [subsidyAmount, setSubsidyAmount] = React.useState('1000');
@@ -1825,6 +1822,10 @@ function GovernmentActions() {
           每轮预算收入: ¥15,000 | 当前税率: {formatPercent(currentPlayer.taxRate, 0)}%
         </p>
       </div>
+
+      {currentPlayer.govAbilities && (
+        <GovernmentFeedbackPanel government={currentPlayer} gameState={state} />
+      )}
 
       {/* 税率调整 */}
       <div className="p-3 border rounded-lg">

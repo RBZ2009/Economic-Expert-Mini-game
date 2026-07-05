@@ -680,6 +680,13 @@ export interface ProductionConfig {
   capacityCost: number;         // 每单位消耗产能点
   marketDemand: number;         // 市场需求系数（影响销量）
   demandElasticity: number;
+  supplyChain: {
+    rawMaterials: number;
+    intermediateGoods: number;
+    packagingLogistics: number;
+    energy: number;
+    importExposure: number;
+  };
 }
 
 export type ProductionGoodType = 'daily_necessities' | 'food' | 'entertainment' | 'luxury';
@@ -694,11 +701,18 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     baseMaterialCost: 8,
     baseSellingPrice: 36,
     minSellingPrice: 28,
-    maxSellingPrice: 52,
+    maxSellingPrice: 72,
     materialConsumption: 1,
     capacityCost: 1,
     marketDemand: 1.08,
     demandElasticity: 0.55,
+    supplyChain: {
+      rawMaterials: 0.38,
+      intermediateGoods: 0.18,
+      packagingLogistics: 0.16,
+      energy: 0.12,
+      importExposure: 0.08,
+    },
   },
   food: {
     id: 'food',
@@ -707,13 +721,20 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     description: '食品类商品，消耗较快',
     baseProductionCost: 3,
     baseMaterialCost: 7,
-    baseSellingPrice: 30,
-    minSellingPrice: 22,
-    maxSellingPrice: 42,
+    baseSellingPrice: 50,
+    minSellingPrice: 32,
+    maxSellingPrice: 110,
     materialConsumption: 0.9,
     capacityCost: 0.75,
     marketDemand: 1.28,
     demandElasticity: 0.35,
+    supplyChain: {
+      rawMaterials: 0.42,
+      intermediateGoods: 0.14,
+      packagingLogistics: 0.14,
+      energy: 0.1,
+      importExposure: 0.05,
+    },
   },
   entertainment: {
     id: 'entertainment',
@@ -724,11 +745,18 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     baseMaterialCost: 13,
     baseSellingPrice: 74,
     minSellingPrice: 48,
-    maxSellingPrice: 108,
+    maxSellingPrice: 148,
     materialConsumption: 1.4,
     capacityCost: 1.8,
     marketDemand: 0.95,
     demandElasticity: 0.95,
+    supplyChain: {
+      rawMaterials: 0.26,
+      intermediateGoods: 0.22,
+      packagingLogistics: 0.17,
+      energy: 0.18,
+      importExposure: 0.16,
+    },
   },
   luxury: {
     id: 'luxury',
@@ -739,11 +767,18 @@ export const PRODUCTION_CONFIGS: Record<ProductionGoodType, ProductionConfig> = 
     baseMaterialCost: 28,
     baseSellingPrice: 168,
     minSellingPrice: 110,
-    maxSellingPrice: 225,
+    maxSellingPrice: 320,
     materialConsumption: 2.6,
     capacityCost: 3.4,
     marketDemand: 0.62,
     demandElasticity: 1.3,
+    supplyChain: {
+      rawMaterials: 0.2,
+      intermediateGoods: 0.24,
+      packagingLogistics: 0.16,
+      energy: 0.14,
+      importExposure: 0.26,
+    },
   },
 };
 
@@ -888,6 +923,14 @@ export interface Player {
     reputation: number;              // 政府声誉
     approvalRating: number;          // 支持率
     policyHistory: string[];         // 政策历史
+    residentSupport?: number;
+    enterpriseSupport?: number;
+    fiscalHealth?: number;
+    stabilitySupport?: number;
+    inflationSatisfaction?: number;
+    budgetSpace?: number;
+    executionEfficiency?: number;
+    removalRisk?: number;
   };
 }
 
@@ -971,6 +1014,7 @@ export interface Market {
   households: HouseholdSegment[];
   npcFirms: NpcFirm[];
   creditConditions: CreditState;
+  supplyChain: SupplyChainState;
   macroState: MacroState;
   priceAnchors: Record<GoodType, {
     referencePrice: number;
@@ -985,6 +1029,14 @@ export interface Market {
   // 经济周期
   economicCycle: EconomicCycle;
   cyclePhase: number;      // 周期内的阶段 0-4
+
+  externalSector: {
+    importCostIndex: number;
+    exportDemandIndex: number;
+    logisticsStress: number;
+    energyPriceIndex: number;
+    tradeBalance: number;
+  };
   
   // 全局税率
   globalTaxRate: number;
@@ -1009,6 +1061,12 @@ export interface RandomEvent {
     allIncomes?: number;
     stockMarket?: { indexChange: number; volatilityChange: number };
     cycleShift?: EconomicCycle;
+    creditTightness?: {
+      household?: number;
+      business?: number;
+      defaultRate?: number;
+    };
+    externalSector?: Partial<Market['externalSector']>;
   };
   probability: number;
   duration?: number;
@@ -1039,6 +1097,12 @@ export interface NpcFirm {
   financialHealth: number;
   plannedSupply: number;
   pricingPower: number;
+  marketShare?: number;
+  brand?: number;
+  quality?: number;
+  deliveryReliability?: number;
+  costControl?: number;
+  status?: 'active' | 'expanding' | 'shrinking' | 'distressed' | 'exited';
 }
 
 export interface CreditState {
@@ -1047,6 +1111,11 @@ export interface CreditState {
   defaultRate: number;
   lendingSentiment: number;
   mortgageApprovalRate: number;
+  consumerApprovalRate?: number;
+  businessApprovalRate?: number;
+  collateralHaircut?: number;
+  riskPremium?: number;
+  badDebtPressure?: number;
 }
 
 export interface MacroState {
@@ -1057,6 +1126,28 @@ export interface MacroState {
   unemploymentPressure: number;
   inflationExpectation: number;
   socialMobilityIndex: number;
+}
+
+export interface SupplyChainState {
+  layers: {
+    basicMaterials: SupplyChainLayerState;
+    intermediateGoods: SupplyChainLayerState;
+    packagingLogistics: SupplyChainLayerState;
+    energy: SupplyChainLayerState;
+  };
+  industryExposure: Record<IndustryType, {
+    basicMaterials: number;
+    intermediateGoods: number;
+    packagingLogistics: number;
+    energy: number;
+  }>;
+}
+
+export interface SupplyChainLayerState {
+  priceIndex: number;
+  availability: number;
+  shortage: number;
+  costShock: number;
 }
 
 export interface PendingPolicy {

@@ -38,7 +38,7 @@ export function MarketStats() {
             <span className="flex items-center gap-1">
               <span>👷</span> 就业率
             </span>
-            <span className="font-medium">{formatPercent(market.employmentRate, 0)}%</span>
+            <span className="font-medium">{formatNumber(market.employmentRate)}%</span>
           </div>
           <Progress 
             value={market.employmentRate} 
@@ -68,7 +68,7 @@ export function MarketStats() {
             <span className="flex items-center gap-1">
               <span>⚖️</span> 基尼系数 (贫富差距)
             </span>
-            <span className="font-medium">{formatPercent(market.giniCoefficient, 2)}</span>
+            <span className="font-medium">{market.giniCoefficient.toFixed(2)}</span>
           </div>
           <Progress 
             value={market.giniCoefficient * 100} 

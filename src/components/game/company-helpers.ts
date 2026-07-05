@@ -4,6 +4,7 @@ import {
   ProductionGoodType,
   PRODUCTION_CONFIGS,
 } from '@/types/game';
+import { getEstimatedUnitVariableCost } from '@/game/company-economics';
 
 export const productionGoodTypes = Object.keys(PRODUCTION_CONFIGS) as ProductionGoodType[];
 
@@ -38,11 +39,18 @@ export function estimateProductSales(
   const supplyPressure = Math.max(0.55, Math.min(1.45, availableDemand / Math.max(1, sd.supply)));
   const qualityFactor = 0.84 + company.productQuality / 120;
   const reputationFactor = 0.8 + company.reputation / 180;
-  const marketPrice = Math.max(prodConfig.minSellingPrice, Math.min(prodConfig.maxSellingPrice, market.goods[productType].currentPrice || prodConfig.baseSellingPrice));
+  const visibleMarketPrice = market.goods[productType].currentPrice || prodConfig.baseSellingPrice;
+  const marketPrice = visibleMarketPrice >= prodConfig.baseSellingPrice * 0.85 && visibleMarketPrice <= prodConfig.baseSellingPrice * 3.2
+    ? visibleMarketPrice
+    : prodConfig.baseSellingPrice;
   const anchor = market.priceAnchors[productType];
   const priceRatioToMarket = Math.max(0.45, pricePerUnit / Math.max(1, marketPrice));
   const overpricingPenalty = priceRatioToMarket > 1
-    ? Math.pow(1 / priceRatioToMarket, prodConfig.demandElasticity * 1.45)
+    ? Math.pow(1 / priceRatioToMarket, prodConfig.demandElasticity * 4.2)
+      * Math.max(0.14, 1 - (priceRatioToMarket - 1) * (prodConfig.demandElasticity < 0.5 ? 1.6 : 2.05))
+      * (priceRatioToMarket > 1.12
+        ? Math.max(0.16, 1 - (priceRatioToMarket - 1.12) * (prodConfig.demandElasticity < 0.5 ? 2.8 : 3.6))
+        : 1)
     : 1;
   const underpricingPenalty = priceRatioToMarket < 1
     ? Math.max(0.82, 1 - (1 - priceRatioToMarket) * 0.22)
@@ -54,6 +62,7 @@ export function estimateProductSales(
   const externalDemandSupport = 0.8 + market.macroState.externalDemandIndex / 240;
   const inventoryPenalty = Math.max(0.68, 1 - (anchor?.inventoryPressure ?? 0) * 0.22);
   const shortageBoost = 1 + (anchor?.shortageIndex ?? 0) * 0.18;
+  const externalDemandBoost = 0.85 + (market.externalSector?.exportDemandIndex ?? market.macroState.externalDemandIndex) / 220;
   const demandAtPrice = Math.floor(
     availableDemand
       * prodConfig.marketDemand
@@ -65,6 +74,7 @@ export function estimateProductSales(
       * cycleMultiplier
       * householdSupport
       * externalDemandSupport
+      * externalDemandBoost
       * inventoryPenalty
       * shortageBoost
   );
@@ -86,7 +96,8 @@ export function findBestSaleOption(
 
   for (let price = config.minSellingPrice; price <= config.maxSellingPrice; price += 1) {
     const sold = estimateProductSales(market, company, productType, quantity, price);
-    const netRevenue = Math.floor(sold * price * (1 - 0.08));
+    const unitCost = getEstimatedUnitVariableCost(productType, company, quantity, market);
+    const netRevenue = Math.floor(sold * Math.max(0, price - unitCost));
     if (
       netRevenue > best.netRevenue
       || (netRevenue === best.netRevenue && Math.abs(price - config.baseSellingPrice) < Math.abs(best.price - config.baseSellingPrice))

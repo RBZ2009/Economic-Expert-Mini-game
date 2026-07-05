@@ -12,7 +12,6 @@ import {
 } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { formatPercent } from '@/types/game';
 import { EventEffectsView } from './EventEffectsView';
 export function TradeConfirmationModal() {
   const { state, dispatch, getPlayerById } = useGame();
@@ -225,37 +224,7 @@ export function EventModal() {
             </div>
           )}
 
-          <div className="space-y-2">
-            <h4 className="font-medium">事件影响：</h4>
-            {recentEvent.effects.inflation !== undefined && (
-              <EffectRow
-                label="通货膨胀率"
-                value={`${recentEvent.effects.inflation > 0 ? '+' : ''}${formatPercent(recentEvent.effects.inflation, 1)}%`}
-                positive={recentEvent.effects.inflation < 0}
-              />
-            )}
-            {recentEvent.effects.employment !== undefined && (
-              <EffectRow
-                label="就业率"
-                value={`${recentEvent.effects.employment > 0 ? '+' : ''}${recentEvent.effects.employment}%`}
-                positive={recentEvent.effects.employment > 0}
-              />
-            )}
-            {recentEvent.effects.socialStability !== undefined && (
-              <EffectRow
-                label="社会稳定度"
-                value={`${recentEvent.effects.socialStability > 0 ? '+' : ''}${recentEvent.effects.socialStability}`}
-                positive={recentEvent.effects.socialStability > 0}
-              />
-            )}
-            {recentEvent.effects.stockMarket && (
-              <EffectRow
-                label="股市指数"
-                value={`${recentEvent.effects.stockMarket.indexChange > 0 ? '+' : ''}${formatPercent(recentEvent.effects.stockMarket.indexChange, 0)}%`}
-                positive={recentEvent.effects.stockMarket.indexChange > 0}
-              />
-            )}
-          </div>
+          <EventEffectsView effects={recentEvent.effects} />
         </div>
 
         <DialogFooter>
@@ -356,24 +325,6 @@ export function TutorialPromptModal() {
   );
 }
 
-function EffectRow({
-  label,
-  value,
-  positive,
-}: {
-  label: string;
-  value: string;
-  positive: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between p-2 bg-muted/50 rounded">
-      <span className="text-sm">{label}</span>
-      <span className={`font-bold ${positive ? 'text-green-600' : 'text-red-600'}`}>
-        {positive ? '↑' : '↓'} {value}
-      </span>
-    </div>
-  );
-}
 
 export function SettlementModal() {
   const { state, dispatch } = useGame();
